@@ -1,4 +1,5 @@
 raw/
-database/
+database/*
+!database/README.md
 *.npz
 __pycache__/

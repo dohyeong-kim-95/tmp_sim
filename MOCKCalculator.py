@@ -4,8 +4,15 @@ fit()이 database/를 통째로 메모리에 올리는 스냅샷 방식. 2층 �
   층1 (관측된 x)   반복 관측을 원소별 다수결로 합쳐 합의 배열을 반환
   층2 (미관측 x)   ordinal 공간의 정규화 L1 거리로 k최근접을 찾아 거리 가중 평균
 
-옵티마이저는 result.score(= p_arrays의 합)를 연속 평가값으로 쓰고,
-needs_test=True인 후보만 TRUE_CALCULATOR로 실제 평가한다.
+목적은 다목적(multi-objective)이다:
+  array_sum        p_arrays의 합 — 최대화
+  <list key>_mean  각 x의 list y의 평균 — 최소화
+
+MOCK은 이들을 하나의 점수로 합치지 않는다. 가중 결합/스칼라화는 trade-off를
+고르는 일이고 그건 옵티마이저의 책임이다. MOCK은 result.objectives로
+목적별 값만 노출한다.
+
+needs_test=True인 후보는 서로게이트를 믿지 말고 TRUE_CALCULATOR로 실제 평가한다.
 """
 
 from __future__ import annotations
@@ -15,16 +22,19 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import orjson
 
 from util.ingest import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS, ARRAYS_DIRNAME, CATALOG_NAME
 
-# optimizer.py는 이 저장소 밖에 있다(GA/SA 본체). import만 한다.
-# optimizer.py가 import 경로에 없으면 이 모듈은 실행되지 않는다. util/ingest.py는
-# optimizer에 의존하지 않으므로 단독 실행 가능.
-from optimizer import code_to_ord, ord_to_code  # noqa: F401  (ord_to_code는 옵티마이저 측에서 사용)
+ARRAY_SUM_KEY = "array_sum"
+
+
+def objective_key(list_key: str) -> str:
+    """list y에서 파생된 목적함수 이름."""
+    return f"{list_key}_mean"
 
 
 @dataclass(frozen=True)
@@ -47,8 +57,8 @@ class Observed:
     stacks: dict[str, np.ndarray]      # array key -> (n_obs, *5D) bool
     consensus: dict[str, np.ndarray]   # array key -> 5D bool (원소별 다수결)
     p: dict[str, np.ndarray]           # array key -> 5D float (True 비율)
+    list_means: dict[str, np.ndarray]  # list key -> (n_obs,) 관측별 mean(list)
     scalars: dict[str, np.ndarray]     # scalar key -> (n_obs,)
-    lists: dict[str, object]           # list key -> 첫 관측
 
 
 @dataclass
@@ -57,18 +67,18 @@ class MockResult:
     layer: int
     arrays: dict[str, np.ndarray]      # bool 예측 (p >= 0.5)
     p_arrays: dict[str, np.ndarray]    # 원소별 [0, 1]
-    lists: dict[str, object]
-    scalars: dict[str, float]
+    objectives: dict[str, float]       # array_sum(최대화) + <list key>_mean(최소화)
+    scalars: dict[str, float]          # batch 공통 설정값 — 목적함수가 아니다
     n_obs: int
     nearest_dist: float
     needs_test: bool
-    score: float                       # p_arrays의 합 — 옵티마이저 평가값
 
 
 @dataclass
 class ValidationReport:
     ok: bool
     arrays: dict[str, dict] = field(default_factory=dict)
+    objectives: dict[str, dict] = field(default_factory=dict)
     scalars: dict[str, dict] = field(default_factory=dict)
 
 
@@ -115,6 +125,7 @@ def array_bounds(stack: np.ndarray, cfg: MockConfig) -> tuple[np.ndarray, np.nda
 
 
 def scalar_bounds(values: np.ndarray, cfg: MockConfig) -> tuple[float, float, str]:
+    """스칼라 값(설정값과 list y 파생 목적함수 공통)의 허용 범위."""
     mean = float(values.mean())
     if values.shape[0] >= cfg.min_obs:
         # 관측이 1개면 표본표준편차가 정의되지 않는다(min_obs=1 설정에서 발생).
@@ -125,13 +136,32 @@ def scalar_bounds(values: np.ndarray, cfg: MockConfig) -> tuple[float, float, st
 
 # --------------------------------------------------------------------------
 class MOCKCalculator:
-    def __init__(self, db_dir: str | Path = "database", config: MockConfig | None = None):
+    def __init__(
+        self,
+        db_dir: str | Path = "database",
+        config: MockConfig | None = None,
+        code_to_ord: Callable[[str], list[int]] | None = None,
+    ):
+        """code_to_ord를 넘기지 않으면 optimizer.code_to_ord를 늦게 import한다.
+
+        optimizer.py는 이 저장소 밖에 있다(GA/SA 본체). 늦은 import라서 모듈을
+        불러오는 것만으로는 실패하지 않고, 실제로 ordinal이 필요한 시점에만
+        요구된다. 테스트는 stub을 주입해 optimizer 없이 돌린다.
+        """
         self.db_dir = Path(db_dir)
         self.cfg = config or MockConfig()
+        self._code_to_ord = code_to_ord
         self.observed: dict[str, Observed] = {}
         self._x_list: list[str] = []
         self._ords: np.ndarray | None = None      # (n_x, n_vars)
         self._ranges: np.ndarray | None = None    # (n_vars,)
+
+    def _ord_vec(self, x: str) -> np.ndarray:
+        if self._code_to_ord is None:
+            from optimizer import code_to_ord  # optimizer.py는 이 저장소 밖에 있다
+
+            self._code_to_ord = code_to_ord
+        return np.asarray(self._code_to_ord(x), dtype=float)
 
     # ---- fit -------------------------------------------------------------
     def fit(self) -> "MOCKCalculator":
@@ -160,18 +190,22 @@ class MOCKCalculator:
             stacks = {key: np.stack(per_key[key]) for key in ARRAY_KEYS}
             p = {key: stacks[key].mean(axis=0) for key in ARRAY_KEYS}
             consensus = {key: p[key] >= 0.5 for key in ARRAY_KEYS}
-            scalars = {
-                key: np.asarray([r[key] for r in meta[x]], dtype=float) for key in SCALAR_KEYS
-            }
             self.observed[x] = Observed(
                 x=x,
-                ord_vec=np.asarray(code_to_ord(x), dtype=float),
+                ord_vec=self._ord_vec(x),
                 n_obs=stacks[ARRAY_KEYS[0]].shape[0],
                 stacks=stacks,
                 consensus=consensus,
                 p=p,
-                scalars=scalars,
-                lists={key: meta[x][0][key] for key in LIST_KEYS},
+                # list y는 원소 단위로 합의하지 않는다. 최적화가 쓰는 건 그 평균뿐.
+                list_means={
+                    key: np.asarray([float(np.mean(r[key])) for r in meta[x]], dtype=float)
+                    for key in LIST_KEYS
+                },
+                scalars={
+                    key: np.asarray([r[key] for r in meta[x]], dtype=float)
+                    for key in SCALAR_KEYS
+                },
             )
 
         self._x_list = sorted(self.observed)
@@ -201,12 +235,13 @@ class MOCKCalculator:
         obs = self.observed.get(x)
         if obs is not None:
             return self._result(
-                x, layer=1, p={k: obs.p[k] for k in ARRAY_KEYS},
-                lists=obs.lists,
+                x, layer=1,
+                p={k: obs.p[k] for k in ARRAY_KEYS},
+                list_means={k: float(obs.list_means[k].mean()) for k in LIST_KEYS},
                 scalars={k: float(obs.scalars[k].mean()) for k in SCALAR_KEYS},
                 n_obs=obs.n_obs, nearest_dist=0.0,
             )
-        return self._predict_layer2(x, np.asarray(code_to_ord(x), dtype=float))
+        return self._predict_layer2(x, self._ord_vec(x))
 
     def _predict_layer2(self, x: str, ord_vec: np.ndarray, exclude: int | None = None) -> MockResult:
         dists = self._distances(ord_vec)
@@ -226,29 +261,37 @@ class MOCKCalculator:
             key: sum(wi * nb.consensus[key] for wi, nb in zip(w, neighbors))
             for key in ARRAY_KEYS
         }
+        list_means = {
+            key: float(sum(wi * nb.list_means[key].mean() for wi, nb in zip(w, neighbors)))
+            for key in LIST_KEYS
+        }
         scalars = {
             key: float(sum(wi * nb.scalars[key].mean() for wi, nb in zip(w, neighbors)))
             for key in SCALAR_KEYS
         }
         return self._result(
-            x, layer=2, p=p,
-            lists=neighbors[0].lists,  # 보간하지 않고 최근접 것을 그대로 쓴다
-            scalars=scalars, n_obs=0, nearest_dist=float(dists[order[0]]),
+            x, layer=2, p=p, list_means=list_means, scalars=scalars,
+            n_obs=0, nearest_dist=float(dists[order[0]]),
         )
 
-    def _result(self, x, layer, p, lists, scalars, n_obs, nearest_dist) -> MockResult:
+    def _result(self, x, layer, p, list_means, scalars, n_obs, nearest_dist) -> MockResult:
+        objectives = {ARRAY_SUM_KEY: float(sum(p[key].sum() for key in ARRAY_KEYS))}
+        for key in LIST_KEYS:
+            objectives[objective_key(key)] = list_means[key]
         return MockResult(
             x=x, layer=layer,
             arrays={key: p[key] >= 0.5 for key in ARRAY_KEYS},
-            p_arrays=p, lists=dict(lists), scalars=scalars,
+            p_arrays=p, objectives=objectives, scalars=scalars,
             n_obs=n_obs, nearest_dist=nearest_dist,
             needs_test=nearest_dist > self.cfg.trust_dist,
-            score=float(sum(p[key].sum() for key in ARRAY_KEYS)),
         )
 
-    def evaluate(self, x: str) -> float:
-        """옵티마이저용 연속 평가값."""
-        return self.predict(x).score
+    def objectives(self, x: str) -> dict[str, float]:
+        """목적별 값. array_sum은 최대화, <list key>_mean은 최소화 대상.
+
+        가중 결합은 하지 않는다 — trade-off를 고르는 건 옵티마이저의 책임이다.
+        """
+        return self.predict(x).objectives
 
     # ---- 검증 -------------------------------------------------------------
     def validate(self, x: str, result: MockResult) -> ValidationReport:
@@ -269,23 +312,31 @@ class MOCKCalculator:
                 "n_obs": obs.n_obs, "rule": rule,
             }
             report.ok &= ok
+
+        # list y 파생 목적함수와 batch 설정값은 같은 스칼라 규칙을 쓴다.
+        for key in LIST_KEYS:
+            name = objective_key(key)
+            report.objectives[name] = self._check_scalar(
+                obs.list_means[key], result.objectives[name], obs.n_obs
+            )
+            report.ok &= report.objectives[name]["ok"]
         for key in SCALAR_KEYS:
-            lo, hi, rule = scalar_bounds(obs.scalars[key], self.cfg)
-            value = result.scalars[key]
-            ok = lo <= value <= hi
-            report.scalars[key] = {
-                "ok": ok, "value": value, "lo": lo, "hi": hi,
-                "n_obs": obs.n_obs, "rule": rule,
-            }
-            report.ok &= ok
+            report.scalars[key] = self._check_scalar(
+                obs.scalars[key], result.scalars[key], obs.n_obs
+            )
+            report.ok &= report.scalars[key]["ok"]
         return report
+
+    def _check_scalar(self, values: np.ndarray, value: float, n_obs: int) -> dict:
+        lo, hi, rule = scalar_bounds(values, self.cfg)
+        return {
+            "ok": bool(lo <= value <= hi), "value": value,
+            "lo": lo, "hi": hi, "n_obs": n_obs, "rule": rule,
+        }
 
     def self_check(self) -> dict:
         """합의가 자기 관측 범위를 통과하는지. 구조적으로 100%여야 한다."""
-        failures = []
-        for x in self._x_list:
-            if not self.validate(x, self.predict(x)).ok:
-                failures.append(x)
+        failures = [x for x in self._x_list if not self.validate(x, self.predict(x)).ok]
         return {
             "n_x": len(self._x_list),
             "n_fail": len(failures),
@@ -300,8 +351,7 @@ class MOCKCalculator:
 
         targets = self._x_list if limit is None else self._x_list[:limit]
         n_pass, n_needs_test, agree = 0, 0, []
-        for x in targets:
-            i = self._x_list.index(x)
+        for i, x in enumerate(targets):
             pred = self._predict_layer2(x, self.observed[x].ord_vec, exclude=i)
             if self.validate(x, pred).ok:
                 n_pass += 1

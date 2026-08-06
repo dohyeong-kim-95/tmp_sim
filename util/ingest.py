@@ -24,9 +24,9 @@ import orjson
 # 플레이스홀더 — 실제 로그의 키 이름/차원으로 교체할 것.
 # --------------------------------------------------------------------------
 X_KEY = "x"
-ARRAY_KEYS = ("y1_key", "y2_key")      # bool 5D array (batch 포함 6D로 기록됨)
-LIST_KEYS = ("y3_key", "y4_key")       # x 하나당 list
-SCALAR_KEYS = ("y5_key", "y6_key")     # batch 공통 설정값
+ARRAY_KEYS = ("yARR1_key", "yARR2_key")      # bool 5D array (batch 포함 6D로 기록됨)
+LIST_KEYS = ("yLST1_key", "yLST2_key")       # x 하나당 list
+SCALAR_KEYS = ("y1_cfg_key", "y2_cfg_key")     # batch 공통 설정값
 
 # 배열 내부 축1의 고정 크기. 축 0/1 뒤바뀜 판정에 쓰인다.
 AXIS1_SIZE = 4
@@ -57,21 +57,35 @@ def load_done_ids(catalog_path: Path) -> set[str]:
 
 
 def read_run(path: Path) -> dict[int, dict]:
-    """한 run 파일을 iteration -> 병합된 레코드로 읽는다."""
+    """한 run 파일을 iteration -> 병합된 레코드로 읽는다.
+
+    실험이 실시간으로 append하는 파일이라 마지막 줄은 쓰다 만 상태일 수 있다.
+    그건 정상 상황이므로 경고만 하고 넘긴다(다음 실행에서 완성된다).
+    마지막이 아닌 줄이 깨졌다면 진짜 손상이므로 중단한다.
+    """
     records: dict[int, dict] = {}
     with path.open("rb") as f:
-        for lineno, line in enumerate(f, 1):
-            if not line.strip():
+        lines = f.readlines()
+    last_lineno = max((i for i, l in enumerate(lines, 1) if l.strip()), default=0)
+
+    for lineno, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            obj = orjson.loads(line)
+        except orjson.JSONDecodeError as e:
+            if lineno == last_lineno:
+                print(
+                    f"[ingest] 경고: {path}:{lineno} 마지막 줄이 쓰다 만 상태 — 스킵 ({e})",
+                    file=sys.stderr,
+                )
                 continue
-            try:
-                obj = orjson.loads(line)
-            except orjson.JSONDecodeError as e:
-                raise IngestError(f"{path}:{lineno} JSON 파싱 실패: {e}") from e
-            for iteration, fields in obj.items():
-                rec = records.setdefault(int(iteration), {})
-                for key, value in fields.items():
-                    if value is not None:
-                        rec[key] = value
+            raise IngestError(f"{path}:{lineno} JSON 파싱 실패: {e}") from e
+        for iteration, fields in obj.items():
+            rec = records.setdefault(int(iteration), {})
+            for key, value in fields.items():
+                if value is not None:
+                    rec[key] = value
     return records
 
 

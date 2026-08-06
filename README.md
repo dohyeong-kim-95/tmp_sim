@@ -9,9 +9,10 @@
   ordinal 정수 리스트와 상호 변환된다.
 - TRUE_CALCULATOR의 출력은 batch 단위로:
   - bool 5D array 2개 (내용은 볼록한 blob 형태)
-  - list 2개
-  - scalar 2개 (batch 공통 설정값)
-- 최종 목표는 **bool array의 합이 크고 scalar는 작은 X**를 GA/SA 계열로 찾는 것.
+  - list 2개 — **각 x의 list의 평균이 최소화 대상 목적함수**
+  - scalar 2개 — batch 공통 설정값. **목적함수가 아니다**
+- 최종 목표는 **bool array의 합이 크고 list y의 평균이 작은 X**를 GA/SA 계열로
+  찾는 것. 즉 다목적(multi-objective)이다.
 - 같은 X라도 실행마다 출력이 조금씩 다르다(noise). 따라서 한 X에 대한 반복 관측을
   모으는 것 자체가 데이터 자산이다.
 
@@ -32,15 +33,24 @@ README.md
 util/
   ingest.py          # raw/*.jsonl -> database/ (A)
 MOCKCalculator.py    # 서로게이트 (B)
+tests/
+  make_fixture.py    # 스펙만으로 합성 raw/*.jsonl 생성
+  conftest.py
+  test_ingest.py
+  test_mock.py
+  fixture_output/
+    catalog_example.jsonl  # ingest 산출물에서 뽑은 catalog 예시 5줄
 
 raw/                 # (gitignore) TRUE_CALCULATOR 실행 로그, run 하나당 파일 하나
-database/            # (gitignore) ingest 산출물
+database/            # (gitignore, README.md만 예외) ingest 산출물
+  README.md          #   catalog/npz 스키마 문서
   catalog.jsonl      #   x 하나당 한 줄
   arrays/{array_id}.npz
 ```
 
 `raw/`, `database/`는 데이터라서 버전 관리하지 않는다. `database/`는 언제든
-`raw/`로부터 재생성 가능한 파생물이다.
+`raw/`로부터 재생성 가능한 파생물이다. 단 스키마 문서
+[`database/README.md`](database/README.md)만 `.gitignore` 예외로 커밋된다.
 
 ## 3. 플레이스홀더
 
@@ -51,8 +61,8 @@ database/            # (gitignore) ingest 산출물
 | --- | --- | --- |
 | `util/ingest.py` | `X_KEY` | X(코드 문자열 batch)의 키 이름 |
 | `util/ingest.py` | `ARRAY_KEYS` | bool 5D array 2개의 키 이름 |
-| `util/ingest.py` | `LIST_KEYS` | list y 2개의 키 이름 |
-| `util/ingest.py` | `SCALAR_KEYS` | scalar y 2개의 키 이름 |
+| `util/ingest.py` | `LIST_KEYS` | list y 2개의 키 이름 (평균이 목적함수) |
+| `util/ingest.py` | `SCALAR_KEYS` | batch 공통 설정값 2개의 키 이름 |
 | `util/ingest.py` | `AXIS1_SIZE` | 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용) |
 | `MOCKCalculator.py` | `MockConfig` | k, trust_dist, min_obs, dilate_d, z, abs_tol |
 
@@ -65,8 +75,8 @@ database/            # (gitignore) ingest 산출물
 값으로 병합**해서 하나의 레코드로 만든다.
 
 ```jsonl
-{"1": {"x": ["A", "B"], "y1_key": [[...]], "y3_key": [[...]], "y5_key": null}}
-{"1": {"x": null,       "y1_key": null,    "y3_key": null,    "y5_key": 0.5}}
+{"1": {"x": ["A", "B"], "yARR1_key": [[...]], "yLST1_key": [[...]], "y1_cfg_key": null}}
+{"1": {"x": null,       "yARR1_key": null,    "yLST1_key": null,    "y1_cfg_key": 0.5}}
 ```
 
 run(파일)마다 iteration 번호가 1부터 리셋되므로 고유 키는 **(파일명, iteration)**.
@@ -95,11 +105,19 @@ batch를 풀어 **x 하나당 한 줄**.
 
 ```json
 {"x": "<code>", "array_id": "run_a:1", "batch_pos": 0,
- "y3_key": [...], "y4_key": [...], "y5_key": 0.5, "y6_key": 1.2}
+ "yLST1_key": [...], "yLST2_key": [...], "y1_cfg_key": 0.5, "y2_cfg_key": 1.2}
 ```
 
 같은 x가 여러 번 관측되면 줄이 여러 개 생긴다. 이것이 곧 **noise 반복 관측
 수집**이며, 서로게이트 층1과 검증 계약의 재료다.
+
+list y는 평균만 쓰이지만 catalog에는 **원본 리스트 그대로** 저장한다. database는
+손실 없이 보관하고, 목적함수로의 파생(mean)은 `MOCKCalculator`가 한다.
+
+한 줄의 전체 스키마는 [`database/README.md`](database/README.md) 참고. 실제 줄이
+어떻게 생겼는지는 합성 fixture를 ingest해서 뽑은
+[`tests/fixture_output/catalog_example.jsonl`](tests/fixture_output/catalog_example.jsonl)
+을 보면 된다(반복 관측된 x 포함).
 
 ### 출력 2: `database/arrays/{array_id}.npz`
 
@@ -114,6 +132,14 @@ catalog의 `(array_id, batch_pos)`가 배열 안의 좌표 역할을 한다.
   다음 실행에 맡긴다.
 - npz를 먼저 쓰고 catalog를 나중에 쓴다. catalog가 완료 표시이므로, 중간에 죽어도
   다시 실행하면 그 iteration부터 다시 처리된다.
+
+### torn write 내성
+
+`raw/*.jsonl`은 실험이 실시간으로 append하는 파일이라, ingest가 도는 시점에
+**마지막 줄이 쓰다 만 상태**일 수 있다. 이건 손상이 아니라 정상 상황이다.
+
+- 파일의 **마지막 줄** 파싱 실패 → 경고만 찍고 스킵. 다음 실행에서 완성된 줄을 읽는다.
+- **마지막이 아닌 줄** 파싱 실패 → 진짜 손상이므로 에러로 중단.
 
 ### 실행
 
@@ -132,16 +158,34 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 
 ### 2층 구조
 
-- **층1 — 관측된 x**: 반복 관측을 **원소별 다수결**로 합쳐 합의(consensus) 배열을
-  반환한다. `p_arrays`는 관측 중 True 비율.
+- **층1 — 관측된 x**: 배열은 반복 관측을 **원소별 다수결**로 합쳐
+  합의(consensus)를 반환한다. `p_arrays`는 관측 중 True 비율.
+  list y는 원소 단위로 합의하지 않는다 — 관측마다 `mean(list)`를 구해 스칼라처럼
+  다루고, 그 값들의 평균이 층1의 예측이다.
 - **층2 — 미관측 x**: ordinal 벡터 공간의 **정규화 L1 거리**
   `sum(|a-b| / range) / n_vars`로 k최근접 관측을 찾아 **거리 가중 soft 평균** →
   `p_arrays`(원소별 [0,1]). `p >= 0.5`가 bool 예측.
+  list y의 평균값과 설정 스칼라도 같은 가중치로 평균낸다.
   최근접 거리가 `trust_dist`를 넘으면 `needs_test=True`
   ("서로게이트를 믿지 말고 TRUE로 실제 평가하라"는 신호).
 
-옵티마이저는 `p_arrays`의 합(`result.score`)을 연속 평가값으로 쓴다. bool로
-반올림된 합보다 gradient-free 탐색에서 신호가 매끄럽다.
+### 목적함수 — MOCK은 스칼라화하지 않는다
+
+목적은 **다목적**이다. `MockResult.objectives`가 목적별 값을 그대로 노출한다.
+
+| 이름 | 방향 | 뜻 |
+| --- | --- | --- |
+| `array_sum` | 최대화 | `p_arrays`의 합. bool로 반올림한 합보다 gradient-free 탐색에서 신호가 매끄럽다 |
+| `yLST1_key_mean` | 최소화 | 그 x의 `yLST1_key` 리스트 평균 |
+| `yLST2_key_mean` | 최소화 | 그 x의 `yLST2_key` 리스트 평균 |
+
+**가중 결합·스칼라화는 MOCK의 일이 아니라 옵티마이저의 책임이다.** trade-off를
+어떻게 고를지(가중합, Pareto front, constraint 처리)는 탐색 전략의 문제이고,
+서로게이트가 임의의 가중치를 박아 넣으면 그 선택이 숨어버린다. 그래서 MOCK에는
+단일 `score`도 `evaluate()`도 없다.
+
+`y1_cfg_key`/`y2_cfg_key`는 batch 공통 설정값이라 목적함수가 아니다. `result.scalars`에
+따로 담기고, 검증에만 쓰인다.
 
 ### 검증 계약
 
@@ -150,7 +194,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 - **배열**
   - 관측 충분(`n_obs >= min_obs`): `관측 교집합 ⊆ 예측 ⊆ 관측 합집합`
   - 부족: 합의 배열의 `erode(d) ⊆ 예측 ⊆ dilate(d)` (거리 `d = dilate_d`, Manhattan)
-- **스칼라**
+- **스칼라** — list y 파생 목적함수(`*_mean`)와 설정 스칼라에 같은 규칙을 쓴다
   - 충분: `mean ± z·σ`
   - 부족: `mean ± abs_tol`
 
@@ -172,14 +216,22 @@ mock = MOCKCalculator(db_dir="database", config=MockConfig(k=5, trust_dist=0.05)
 mock.fit()
 
 r = mock.predict(candidate_code)
-r.score        # p_arrays의 합 = 옵티마이저 평가값
+r.objectives   # {"array_sum": ..., "yLST1_key_mean": ..., "yLST2_key_mean": ...}
 r.needs_test   # True면 TRUE_CALCULATOR로 실제 평가
 
 print(mock.self_check())
 print(mock.loo_check())
 ```
 
-CLI로도 점검할 수 있다.
+`code_to_ord`는 기본적으로 `optimizer`에서 **늦게(lazy) import**된다. 모듈을
+불러오는 것만으로는 optimizer를 요구하지 않고, ordinal이 실제로 필요한 시점에만
+찾는다. 테스트처럼 optimizer가 없는 환경에서는 생성자로 주입한다.
+
+```python
+mock = MOCKCalculator("database", code_to_ord=lambda code: [ord(c) for c in code])
+```
+
+CLI로도 점검할 수 있다(이쪽은 `optimizer.py`가 필요하다).
 
 ```bash
 python MOCKCalculator.py --db-dir database   # fit + self_check + loo_check 요약
@@ -199,12 +251,49 @@ python MOCKCalculator.py --db-dir database   # fit + self_check + loo_check 요�
 반복할수록 관측 영역이 넓어져 `needs_test` 비율이 떨어지고, 비싼 TRUE 호출이
 줄어든다.
 
-## 7. 의존성
+## 7. 테스트
+
+실제 데이터 없이 돈다. `tests/make_fixture.py`가 **스펙만으로** 소형 합성
+`raw/*.jsonl`을 만들고, 그걸 ingest해서 두 부품을 검증한다.
 
 ```bash
-pip install numpy orjson
+pip install pytest
+python -m pytest tests -q
 ```
 
-`optimizer.py`(`code_to_ord`, `ord_to_code`)는 이 저장소에 없다. `MOCKCalculator.py`는
-이를 import하므로, `optimizer.py`가 import 경로에 없으면 실행되지 않는다.
+fixture가 담는 케이스:
+
+| 케이스 | 어디에 |
+| --- | --- |
+| 두 줄 분할 기록 (배열 줄 + 스칼라 줄) | 모든 run |
+| 파일 간 iteration 번호 리셋 | `run_a`~`run_d` 전부 iteration 1부터 |
+| 같은 x의 반복 관측 (blob 경계 1~2원소 흔들림) | `run_a` + `run_b`가 같은 코드 관측 |
+| 축 0/1이 뒤바뀐 run | `run_b` |
+| 미완성 iteration | `run_c:3` (배열 줄만) |
+| 쓰다 만 마지막 줄 | `run_d` 끝 |
+
+fixture만 따로 만들어 눈으로 볼 수도 있다.
+
+```bash
+python tests/make_fixture.py raw
+```
+
+`tests/fixture_output/catalog_example.jsonl`은 그 fixture를 ingest한 결과에서
+5줄을 뽑아 커밋한 것이다. 스키마 문서의 예시로 쓰이며, 키 이름이 바뀌었는데
+예시가 따라오지 않으면 테스트가 실패한다.
+
+`optimizer.py`가 없으므로 테스트는 `code_to_ord` stub(문자→ordinal)을 생성자로
+주입한다.
+
+## 8. 의존성
+
+```bash
+pip install numpy orjson        # 런타임
+pip install pytest              # 테스트
+```
+
+`optimizer.py`(`code_to_ord`, `ord_to_code`)는 이 저장소에 없다.
+`MOCKCalculator.py`는 `code_to_ord`만 필요하고 그것도 늦게 import하므로, 모듈을
+불러오거나 stub을 주입하는 데는 optimizer가 없어도 된다. 기본 경로로 쓰려면
+`optimizer.py`가 import 경로에 있어야 한다.
 `util/ingest.py`는 optimizer에 의존하지 않으므로 단독 실행 가능하다.
