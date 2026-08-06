@@ -19,7 +19,7 @@
 TRUE_CALCULATOR 호출은 비싸므로, 축적된 실행 로그로 TRUE를 흉내내는 서로게이트를
 두고 후보 대부분을 서로게이트로 걸러낸다. 이 저장소는 그 두 부품을 담는다.
 
-- **A. ingest 파이프라인** (`util/ingest.py`): `raw/*.jsonl` → `database/`
+- **A. database 갱신 파이프라인** (`util/_update_database.py`): `raw/*.jsonl` → `database/`
 - **B. 서로게이트** (`MOCKCalculator.py`): `database/`로 TRUE를 흉내냄
 
 `optimizer.py`(GA/SA 본체, `code_to_ord`/`ord_to_code`)와 TRUE_CALCULATOR 자체는
@@ -30,22 +30,21 @@ TRUE_CALCULATOR 호출은 비싸므로, 축적된 실행 로그로 TRUE를 흉�
 ```
 README.md
 .gitignore
-config.example.toml  # 실험 고유 값의 템플릿 (커밋됨)
-config.toml          # (gitignore) 실제 설정. 예시를 복사해 만든다
 util/
-  config.py          # config.toml 로더
-  ingest.py          # raw/*.jsonl -> database/ (A)
-MOCKCalculator.py    # 서로게이트 (B)
+  _update_database.py  # raw/*.jsonl -> database/ (A). 실험 고유 상수도 이 파일 헤더에 있다
+MOCKCalculator.py      # 서로게이트 (B)
 tests/
-  make_fixture.py    # 스펙만으로 합성 raw/*.jsonl 생성
+  make_fixture.py      # 스펙만으로 합성 raw/*.jsonl 생성
   conftest.py
-  test_ingest.py
+  test_update_database.py
+  test_constants.py
   test_mock.py
+  test_validation_contract.py
   fixture_output/
-    catalog_example.jsonl  # ingest 산출물에서 뽑은 catalog 예시 5줄
+    catalog_example.jsonl  # database 갱신 산출물에서 뽑은 catalog 예시 5줄
 
 raw/                 # (gitignore) TRUE_CALCULATOR 실행 로그, run 하나당 파일 하나
-database/            # (gitignore, README.md만 예외) ingest 산출물
+database/            # (gitignore, README.md만 예외) 갱신 산출물
   README.md          #   catalog/npz 스키마 문서
   catalog.jsonl      #   x 하나당 한 줄
   arrays/{array_id}.npz
@@ -55,35 +54,39 @@ database/            # (gitignore, README.md만 예외) ingest 산출물
 `raw/`로부터 재생성 가능한 파생물이다. 단 스키마 문서
 [`database/README.md`](database/README.md)만 `.gitignore` 예외로 커밋된다.
 
-## 3. 설정 (`config.toml`)
+## 3. 설정 (상수 헤더)
 
-실제 실험의 키 이름·차원은 코드에 없다. **`config.toml`이 그 값들의 유일한
-출처**이고, 코드는 `util/config.py` 로더를 거쳐서만 읽는다.
+실제 실험의 키 이름·차원은 **`util/_update_database.py` 파일 맨 위 상수 블록**에
+모여 있다. 설정 파일도 로더도 없다 — 그 블록이 유일한 출처이고, 다른 모듈은
+거기서 import해서 쓴다.
 
-```bash
-cp config.example.toml config.toml   # 그 다음 실제 실험 값으로 고친다
+```python
+from util._update_database import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
 ```
 
-`config.toml`이 없으면 로더가 위 명령을 안내하는 에러를 낸다. `config.toml`은
-커밋하지 않는다(`.gitignore`). 담기는 값:
+실험이 바뀌면 그 블록만 고친다. 담기는 값:
 
-| 섹션 | 항목 | 의미 |
-| --- | --- | --- |
-| `[keys]` | `x` | X(코드 문자열 batch)의 키 이름 |
-| `[keys]` | `array` | bool 5D array 2개의 키 이름 |
-| `[keys]` | `list` | list y 2개의 키 이름 (평균이 목적함수) |
-| `[keys]` | `scalar` | batch 공통 설정값 2개의 키 이름 |
-| `[ingest]` | `axis1_size` | 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용) |
-| `[ingest]` | `raw_dir`, `db_dir` | 입출력 디렉터리 |
+| 상수 | 의미 |
+| --- | --- |
+| `X_KEY` | X(코드 문자열 batch)의 키 이름 |
+| `ARRAY_KEYS` | bool 5D array 2개의 키 이름 |
+| `LIST_KEYS` | list y 2개의 키 이름 (평균이 목적함수) |
+| `SCALAR_KEYS` | batch 공통 설정값 2개의 키 이름 |
+| `AXIS1_SIZE` | 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용) |
+| `RAW_DIR`, `DB_DIR` | 입출력 디렉터리 |
+| `REQUIRED_KEYS` | 위 키 선언에서 파생 — 한 iteration이 완성되었다고 보는 기준 |
+
+커밋된 값은 자리를 잡아두기 위한 **플레이스홀더**이며 실제 실험의 키 이름·차원이
+아니다. 실제 로그에 맞춰 고쳐 쓴다.
 
 서로게이트의 **튜닝 파라미터는 여기 들어가지 않는다.** `k`, `trust_dist`,
 `min_obs`, `dilate_d`, `z`, `abs_tol`은 실험이 정해주는 사실이 아니라 탐색 전략의
 선택이라 `MOCKCalculator.MockConfig` dataclass에 남는다.
 
 아래 문서에서는 구체 키 이름 대신 **역할 표기**(`<array key 1>`, `<list key 1>`,
-`<cfg key 1>` …)를 쓴다. 실제 이름은 `config.toml`을 보면 된다.
+`<cfg key 1>` …)를 쓴다. 실제 이름은 상수 블록을 보면 된다.
 
-## 4. A. ingest 파이프라인
+## 4. A. database 갱신 파이프라인
 
 ### 입력 포맷 (`raw/*.jsonl`)
 
@@ -132,7 +135,7 @@ list y는 평균만 쓰이지만 catalog에는 **원본 리스트 그대로** �
 손실 없이 보관하고, 목적함수로의 파생(mean)은 `MOCKCalculator`가 한다.
 
 한 줄의 전체 스키마는 [`database/README.md`](database/README.md) 참고. 실제 줄이
-어떻게 생겼는지는 합성 fixture를 ingest해서 뽑은
+어떻게 생겼는지는 합성 fixture로 database를 갱신해 뽑은
 [`tests/fixture_output/catalog_example.jsonl`](tests/fixture_output/catalog_example.jsonl)
 을 보면 된다(반복 관측된 x 포함).
 
@@ -152,7 +155,7 @@ catalog의 `(array_id, batch_pos)`가 배열 안의 좌표 역할을 한다.
 
 ### torn write 내성
 
-`raw/*.jsonl`은 실험이 실시간으로 append하는 파일이라, ingest가 도는 시점에
+`raw/*.jsonl`은 실험이 실시간으로 append하는 파일이라, 갱신이 도는 시점에
 **마지막 줄이 쓰다 만 상태**일 수 있다. 이건 손상이 아니라 정상 상황이다.
 
 - 파일의 **마지막 줄** 파싱 실패 → 경고만 찍고 스킵. 다음 실행에서 완성된 줄을 읽는다.
@@ -161,8 +164,8 @@ catalog의 `(array_id, batch_pos)`가 배열 안의 좌표 역할을 한다.
 ### 실행
 
 ```bash
-python util/ingest.py                      # raw/ -> database/
-python util/ingest.py --raw-dir raw --db-dir database
+python util/_update_database.py                      # raw/ -> database/
+python util/_update_database.py --raw-dir raw --db-dir database
 ```
 
 단계별 소요 시간(파싱 / 정규화 / npz 쓰기 / catalog 쓰기)을 마지막에 출력한다.
@@ -171,7 +174,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 ## 5. B. MOCKCalculator
 
 `fit()`이 `database/`를 통째로 메모리에 올리는 **스냅샷** 방식. 새 데이터가
-들어오면 ingest를 다시 돌리고 `fit()`을 다시 부른다.
+들어오면 `_update_database`를 다시 돌리고 `fit()`을 다시 부른다.
 
 ### 2층 구조
 
@@ -196,7 +199,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 | `<list key 1>_mean` | 최소화 | 그 x의 첫 번째 list y의 평균 |
 | `<list key 2>_mean` | 최소화 | 그 x의 두 번째 list y의 평균 |
 
-목적함수 이름은 `objective_key()`가 설정된 키 이름에서 파생시킨다. `config.toml`의
+목적함수 이름은 `objective_key()`가 `LIST_KEYS`에서 파생시킨다. 상수 블록의
 키 이름을 바꾸면 objectives 이름도 따라 바뀐다.
 
 **가중 결합·스칼라화는 MOCK의 일이 아니라 옵티마이저의 책임이다.** trade-off를
@@ -204,7 +207,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 서로게이트가 임의의 가중치를 박아 넣으면 그 선택이 숨어버린다. 그래서 MOCK에는
 단일 `score`도 `evaluate()`도 없다.
 
-`[keys] scalar`의 두 값은 batch 공통 설정값이라 목적함수가 아니다.
+`SCALAR_KEYS`의 두 값은 batch 공통 설정값이라 목적함수가 아니다.
 `result.scalars`에 따로 담기고, 검증에만 쓰인다.
 
 ### 검증 계약
@@ -223,7 +226,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 ### 자가 점검
 
 - `self_check()` — 각 관측 x의 합의 배열이 자기 관측 범위를 통과하는지.
-  구조적으로 항상 통과해야 하며, 실패하면 ingest나 합의 로직이 깨진 것이다.
+  구조적으로 항상 통과해야 하며, 실패하면 database 갱신이나 합의 로직이 깨진 것이다.
 - `loo_check()` — leave-one-out. 어떤 x를 이웃 풀에서 빼고 층2로 예측한 뒤 그 x의
   실제 관측으로 검증한다. 층2의 예측력과 `trust_dist` 설정의 타당성을 본다.
 
@@ -232,7 +235,7 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 ```python
 from MOCKCalculator import MOCKCalculator, MockConfig
 
-mock = MOCKCalculator(config=MockConfig(k=5, trust_dist=0.05))   # db_dir 기본값은 config.toml
+mock = MOCKCalculator(config=MockConfig(k=5, trust_dist=0.05))   # db_dir 기본값은 DB_DIR
 mock.fit()
 
 r = mock.predict(candidate_code)
@@ -263,7 +266,7 @@ python MOCKCalculator.py --db-dir database   # fit + self_check + loo_check 요�
 1. 옵티마이저가 후보 X들을 MOCKCalculator로 평가
 2. needs_test=True인 후보만 TRUE_CALCULATOR로 실제 평가
 3. TRUE 실행 로그가 raw/에 쌓임
-4. python util/ingest.py  (멱등 — 새 run만 처리)
+4. python util/_update_database.py  (멱등 — 새 run만 처리)
 5. mock.fit() 재호출 → 서로게이트가 넓어진 관측 영역을 반영
 6. 1로
 ```
@@ -274,7 +277,7 @@ python MOCKCalculator.py --db-dir database   # fit + self_check + loo_check 요�
 ## 7. 테스트
 
 실제 데이터 없이 돈다. `tests/make_fixture.py`가 **스펙만으로** 소형 합성
-`raw/*.jsonl`을 만들고, 그걸 ingest해서 두 부품을 검증한다.
+`raw/*.jsonl`을 만들고, 그걸로 database를 갱신해 두 부품을 검증한다.
 
 ```bash
 pip install pytest
@@ -298,28 +301,28 @@ fixture만 따로 만들어 눈으로 볼 수도 있다.
 python tests/make_fixture.py raw
 ```
 
-`tests/fixture_output/catalog_example.jsonl`은 그 fixture를 ingest한 결과에서
-5줄을 뽑아 커밋한 것이다. 스키마 문서의 예시로 쓰이며, 키 이름이 바뀌었는데
-예시가 따라오지 않으면 테스트가 실패한다. 구체 키 이름이 적힌 곳은 이 파일과
-`config.example.toml`뿐이고, 문서에 이름이 복제되면 테스트가 잡는다.
+`tests/fixture_output/catalog_example.jsonl`은 그 fixture로 database를 갱신한
+결과에서 5줄을 뽑아 커밋한 것이다. 스키마 문서의 예시로 쓰이며, 키 이름이
+바뀌었는데 예시가 따라오지 않으면 테스트가 실패한다. 구체 키 이름이 적힌 곳은 이
+파일과 `util/_update_database.py`의 상수 블록뿐이고, 다른 소스나 문서에 이름이
+복제되면 `test_constants.py`가 잡는다.
 
 `optimizer.py`가 없으므로 테스트는 `code_to_ord` stub(문자→ordinal)을 생성자로
-주입한다. `config.toml`이 없으면 `conftest.py`가 `config.example.toml`을 복사해
-만든다(만든 경우에만 세션 끝에 지운다). 즉 테스트는 예시 설정이 정한 키 이름
-위에서 돌고, `test_config.py`가 그 사실을 확인한다.
+주입한다. 즉 테스트는 상수 블록이 정한 키 이름 위에서 돌고,
+`test_constants.py`가 그 사실을 확인한다.
 
 ## 8. 의존성
 
-Python 3.11 이상 (`tomllib`).
+Python 3.9 이상. 표준 라이브러리 외의 설정 포맷 의존성은 없다 — 실험 고유 값은
+`util/_update_database.py` 헤더의 상수로 들어간다.
 
 ```bash
 pip install numpy orjson        # 런타임
 pip install pytest              # 테스트
-cp config.example.toml config.toml
 ```
 
 `optimizer.py`(`code_to_ord`, `ord_to_code`)는 이 저장소에 없다.
 `MOCKCalculator.py`는 `code_to_ord`만 필요하고 그것도 늦게 import하므로, 모듈을
 불러오거나 stub을 주입하는 데는 optimizer가 없어도 된다. 기본 경로로 쓰려면
 `optimizer.py`가 import 경로에 있어야 한다.
-`util/ingest.py`는 optimizer에 의존하지 않으므로 단독 실행 가능하다.
+`util/_update_database.py`는 optimizer에 의존하지 않으므로 단독 실행 가능하다.

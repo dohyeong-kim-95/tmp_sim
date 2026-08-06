@@ -1,6 +1,6 @@
 # database/ 스키마
 
-`util/ingest.py`가 `raw/*.jsonl`로부터 만드는 산출물. 이 디렉터리의 내용물은
+`util/_update_database.py`가 `raw/*.jsonl`로부터 만드는 산출물. 이 디렉터리의 내용물은
 언제든 `raw/`에서 재생성 가능한 파생물이므로 이 문서 외에는 버전 관리하지 않는다.
 
 ```
@@ -11,8 +11,8 @@ database/
 ```
 
 아래 표에서 `<list key 1>` 같은 표기는 **역할**을 가리킨다. 실제 키 이름과
-`axis1_size`는 [`config.toml`](../config.example.toml)이 정한다 — 이 문서에
-복제하지 않는다.
+`AXIS1_SIZE`는 [`util/_update_database.py`](../util/_update_database.py) 헤더의
+상수 블록이 정한다 — 이 문서에 복제하지 않는다.
 
 ## catalog.jsonl
 
@@ -30,7 +30,7 @@ JSON Lines. 한 줄이 **x 하나의 한 번의 관측**을 나타낸다.
 
 실제 키 이름이 박힌 줄이 어떻게 생겼는지는
 [`tests/fixture_output/catalog_example.jsonl`](../tests/fixture_output/catalog_example.jsonl)
-를 보면 된다 — 손으로 쓴 게 아니라 합성 fixture를 ingest한 산출물에서 5줄을 뽑은
+를 보면 된다 — 손으로 쓴 게 아니라 합성 fixture로 갱신한 산출물에서 5줄을 뽑은
 것이고, 스키마가 바뀌면 테스트가 드리프트를 잡는다. 그 파일에는 `x = "AAA"`가
 `run_a:1`과 `run_b:1`에 각각 나타나는 반복 관측이 들어 있고, `run_a:1`을 공유하는
 두 줄의 설정 스칼라가 같은 것도 볼 수 있다.
@@ -42,13 +42,13 @@ JSON Lines. 한 줄이 **x 하나의 한 번의 관측**을 나타낸다.
 - `array_id`는 run(파일)마다 iteration이 1부터 리셋되기 때문에 필요하다.
   `(파일명, iteration)`이 고유 키다.
 - 같은 `array_id`를 가진 줄들은 설정 스칼라 두 개가 서로 같다(batch 공통).
-- 줄 순서에 의미는 없다. 파일은 append-only이며, 새 run이 ingest되면 뒤에 붙는다.
+- 줄 순서에 의미는 없다. 파일은 append-only이며, 새 run이 들어오면 뒤에 붙는다.
 - `array_id`가 catalog에 있다는 것이 **그 iteration의 처리 완료 표시**다.
-  ingest는 npz를 먼저 쓰고 catalog를 나중에 쓴다.
+  갱신 파이프라인은 npz를 먼저 쓰고 catalog를 나중에 쓴다.
 
 ## arrays/{array_id}.npz
 
-`np.savez_compressed`로 저장된다. 배열 키는 `config.toml`의 `[keys] array`와 같다.
+`np.savez_compressed`로 저장된다. 배열 키는 `ARRAY_KEYS`와 같다.
 
 | npz 키 | dtype | shape |
 | --- | --- | --- |
@@ -59,10 +59,10 @@ JSON Lines. 한 줄이 **x 하나의 한 번의 관측**을 나타낸다.
 
 - **축 0 = batch.** catalog의 `batch_pos`가 이 축의 인덱스다.
 - **축 1~5 = 실험 배열의 내부 5D 축**(`i0`~`i4`). 내용은 볼록한 blob 형태다.
-- **`i1`(= npz 배열의 축 2)은 고정 크기 `[ingest] axis1_size`를 갖는다.** 일부
-  run은 내부 축 0과 1이 뒤바뀐 채 기록되는데, ingest가 이 고정 크기로 판정해
-  `swapaxes(1, 2)`로 통일한다. 즉 **database에 들어온 배열은 항상 정방향이다.**
-  판정이 불가능하면(축 0과 1이 둘 다 그 크기이거나 둘 다 아니면) ingest는
+- **`i1`(= npz 배열의 축 2)은 고정 크기 `AXIS1_SIZE`를 갖는다.** 일부
+  run은 내부 축 0과 1이 뒤바뀐 채 기록되는데, 갱신 파이프라인이 이 고정 크기로
+  판정해 `swapaxes(1, 2)`로 통일한다. 즉 **database에 들어온 배열은 항상
+  정방향이다.** 판정이 불가능하면(축 0과 1이 둘 다 그 크기이거나 둘 다 아니면)
   조용히 통과시키지 않고 중단한다.
 
 x 단위로 쪼개지 않는 이유는 파일 수 폭발을 피하기 위해서다.
@@ -73,11 +73,11 @@ catalog의 `(array_id, batch_pos)`가 배열 좌표다.
 
 ```python
 import numpy as np, orjson
-from util.ingest import CONFIG
+from util._update_database import ARRAY_KEYS, ARRAYS_DIRNAME, CATALOG_NAME, DB_DIR
 
-row = orjson.loads(open(CONFIG.db_dir / "catalog.jsonl", "rb").readline())
-with np.load(CONFIG.db_dir / "arrays" / f"{row['array_id']}.npz") as npz:
-    first = npz[CONFIG.array_keys[0]][row["batch_pos"]]   # 이 x의 5D bool 배열 한 번의 관측
+row = orjson.loads(open(DB_DIR / CATALOG_NAME, "rb").readline())
+with np.load(DB_DIR / ARRAYS_DIRNAME / f"{row['array_id']}.npz") as npz:
+    first = npz[ARRAY_KEYS[0]][row["batch_pos"]]   # 이 x의 5D bool 배열 한 번의 관측
 ```
 
 같은 x의 반복 관측을 모으려면 catalog에서 `x`로 묶은 뒤 각 줄의 좌표로 배열을

@@ -27,11 +27,11 @@ from typing import Callable
 import numpy as np
 import orjson
 
-from util.ingest import (
+from util._update_database import (
     ARRAY_KEYS,
     ARRAYS_DIRNAME,
     CATALOG_NAME,
-    CONFIG,
+    DB_DIR,
     LIST_KEYS,
     SCALAR_KEYS,
 )
@@ -155,7 +155,7 @@ class MOCKCalculator:
         불러오는 것만으로는 실패하지 않고, 실제로 ordinal이 필요한 시점에만
         요구된다. 테스트는 stub을 주입해 optimizer 없이 돌린다.
         """
-        self.db_dir = Path(db_dir) if db_dir is not None else CONFIG.db_dir
+        self.db_dir = Path(db_dir) if db_dir is not None else DB_DIR
         self.cfg = config or MockConfig()
         self._code_to_ord = code_to_ord
         self.observed: dict[str, Observed] = {}
@@ -172,7 +172,7 @@ class MOCKCalculator:
 
     # ---- fit -------------------------------------------------------------
     def fit(self) -> "MOCKCalculator":
-        """database/를 메모리로 올린다. ingest 재실행 후 다시 호출한다."""
+        """database/를 메모리로 올린다. _update_database 재실행 후 다시 호출한다."""
         rows = self._read_catalog()
         if not rows:
             raise RuntimeError(f"catalog가 비어 있다: {self.db_dir / CATALOG_NAME}")
@@ -377,7 +377,7 @@ class MOCKCalculator:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="MOCKCalculator fit + 자가 점검")
-    ap.add_argument("--db-dir", default=CONFIG.db_dir)
+    ap.add_argument("--db-dir", default=DB_DIR)
     ap.add_argument("--k", type=int, default=MockConfig.k)
     ap.add_argument("--trust-dist", type=float, default=MockConfig.trust_dist)
     ap.add_argument("--min-obs", type=int, default=MockConfig.min_obs)

@@ -1,4 +1,4 @@
-"""raw/*.jsonl -> database/ ingest 파이프라인.
+"""raw/*.jsonl -> database/ 갱신 파이프라인.
 
 한 줄 = {"<iteration>": {"<키>": <값>}}. 한 iteration의 정보가 두 줄(배열 줄 +
 스칼라 줄)에 나뉘어 기록되므로 null이 아닌 값으로 병합한다.
@@ -20,27 +20,41 @@ from pathlib import Path
 import numpy as np
 import orjson
 
-if __package__ in (None, ""):   # python util/ingest.py 로 직접 실행한 경우
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from util.config import load_config  # noqa: E402
-
+# ==========================================================================
+# 실험 고유 설정 — 여기가 유일한 출처다
 # --------------------------------------------------------------------------
-# 실험 고유 값은 전부 config.toml에서 온다. 여기에 하드코딩하지 않는다.
-# --------------------------------------------------------------------------
-CONFIG = load_config()
-X_KEY = CONFIG.x_key                  # 입력 code batch
-ARRAY_KEYS = CONFIG.array_keys        # bool 5D array (batch 포함 6D로 기록됨)
-LIST_KEYS = CONFIG.list_keys          # x 하나당 list
-SCALAR_KEYS = CONFIG.scalar_keys      # batch 공통 설정값
-AXIS1_SIZE = CONFIG.axis1_size        # 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용)
-REQUIRED_KEYS = CONFIG.required_keys
+# 키 이름·차원처럼 실험마다 달라지는 값은 이 헤더 블록에만 적는다. 다른 모듈은
+# 이 상수들을 import해서 쓰고, 값을 자기 파일에 복제하지 않는다. 실험이 바뀌면
+# 이 블록만 고친다.
+#
+# 아래 값은 자리를 잡아두기 위한 플레이스홀더이며 실제 실험의 키 이름·차원이
+# 아니다. 실제 로그에 맞춰 고쳐 쓴다.
+#
+# 서로게이트의 튜닝 파라미터(k, trust_dist, min_obs ...)는 여기 없다. 그건
+# 실험이 정해주는 사실이 아니라 탐색 전략의 선택이라 MOCKCalculator.MockConfig에
+# 남는다.
+# ==========================================================================
+
+# raw/*.jsonl 한 줄에 나타나는 키 이름.
+X_KEY = "x"                                   # 입력 code batch
+ARRAY_KEYS = ("yARR1_key", "yARR2_key")       # bool 5D array (batch 포함 6D로 기록됨)
+LIST_KEYS = ("yLST1_key", "yLST2_key")        # x 하나당 list. 그 평균이 최소화 목적함수
+SCALAR_KEYS = ("y1_cfg_key", "y2_cfg_key")    # batch 공통 설정값. 목적함수가 아니다
+
+AXIS1_SIZE = 4              # 배열 내부 축1의 고정 크기. 축 0/1 뒤바뀜 판정에 쓰인다
+RAW_DIR = Path("raw")       # TRUE_CALCULATOR 실행 로그
+DB_DIR = Path("database")   # 이 파이프라인의 산출물
+
+# 한 iteration이 완성되었다고 보기 위해 다 모여야 하는 키.
+REQUIRED_KEYS = (X_KEY,) + ARRAY_KEYS + LIST_KEYS + SCALAR_KEYS
+
+# ==========================================================================
 
 CATALOG_NAME = "catalog.jsonl"
 ARRAYS_DIRNAME = "arrays"
 
 
-class IngestError(RuntimeError):
+class UpdateDatabaseError(RuntimeError):
     pass
 
 
@@ -79,11 +93,11 @@ def read_run(path: Path) -> dict[int, dict]:
         except orjson.JSONDecodeError as e:
             if lineno == last_lineno:
                 print(
-                    f"[ingest] 경고: {path}:{lineno} 마지막 줄이 쓰다 만 상태 — 스킵 ({e})",
+                    f"[update_database] 경고: {path}:{lineno} 마지막 줄이 쓰다 만 상태 — 스킵 ({e})",
                     file=sys.stderr,
                 )
                 continue
-            raise IngestError(f"{path}:{lineno} JSON 파싱 실패: {e}") from e
+            raise UpdateDatabaseError(f"{path}:{lineno} JSON 파싱 실패: {e}") from e
         for iteration, fields in obj.items():
             rec = records.setdefault(int(iteration), {})
             for key, value in fields.items():
@@ -101,7 +115,7 @@ def orient(arr: np.ndarray, array_id: str, key: str) -> np.ndarray:
     기록 배열은 (batch, i0, i1, i2, i3, i4). 정상이면 i1 == AXIS1_SIZE.
     """
     if arr.ndim != 6:
-        raise IngestError(
+        raise UpdateDatabaseError(
             f"{array_id}/{key}: (batch + 5D) = 6D를 기대했으나 ndim={arr.ndim}, "
             f"shape={arr.shape}"
         )
@@ -110,7 +124,7 @@ def orient(arr: np.ndarray, array_id: str, key: str) -> np.ndarray:
         return arr
     if i0 == AXIS1_SIZE and i1 != AXIS1_SIZE:
         return np.swapaxes(arr, 1, 2)
-    raise IngestError(
+    raise UpdateDatabaseError(
         f"{array_id}/{key}: 축 0/1 뒤바뀜 판정 불가. shape={arr.shape}, "
         f"AXIS1_SIZE={AXIS1_SIZE}. 조용히 통과시키면 database가 오염되므로 중단한다."
     )
@@ -123,7 +137,7 @@ def build_arrays(rec: dict, array_id: str, batch: int) -> dict[str, np.ndarray]:
         arr = np.asarray(rec[key], dtype=bool)
         arr = orient(arr, array_id, key)
         if arr.shape[0] != batch:
-            raise IngestError(
+            raise UpdateDatabaseError(
                 f"{array_id}/{key}: batch 크기 불일치. X={batch}, 배열={arr.shape[0]}"
             )
         out[key] = arr
@@ -148,7 +162,7 @@ def check_list_batch(rec: dict, array_id: str, batch: int) -> None:
     for key in LIST_KEYS:
         n = len(rec[key])
         if n != batch:
-            raise IngestError(
+            raise UpdateDatabaseError(
                 f"{array_id}/{key}: batch 크기 불일치. X={batch}, list={n}"
             )
 
@@ -156,7 +170,7 @@ def check_list_batch(rec: dict, array_id: str, batch: int) -> None:
 # --------------------------------------------------------------------------
 # 파이프라인
 # --------------------------------------------------------------------------
-def ingest(raw_dir: Path, db_dir: Path) -> dict:
+def _update_database(raw_dir: Path, db_dir: Path) -> dict:
     catalog_path = db_dir / CATALOG_NAME
     arrays_dir = db_dir / ARRAYS_DIRNAME
     arrays_dir.mkdir(parents=True, exist_ok=True)
@@ -224,8 +238,8 @@ def ingest(raw_dir: Path, db_dir: Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="raw/*.jsonl -> database/")
-    ap.add_argument("--raw-dir", default=CONFIG.raw_dir, type=Path)
-    ap.add_argument("--db-dir", default=CONFIG.db_dir, type=Path)
+    ap.add_argument("--raw-dir", default=RAW_DIR, type=Path)
+    ap.add_argument("--db-dir", default=DB_DIR, type=Path)
     args = ap.parse_args(argv)
 
     if not args.raw_dir.is_dir():
@@ -234,21 +248,21 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     try:
-        stats = ingest(args.raw_dir, args.db_dir)
-    except IngestError as e:
-        print(f"[ingest] 중단: {e}", file=sys.stderr)
+        stats = _update_database(args.raw_dir, args.db_dir)
+    except UpdateDatabaseError as e:
+        print(f"[update_database] 중단: {e}", file=sys.stderr)
         return 1
     total = time.perf_counter() - started
 
     print(
-        f"[ingest] 파일 {stats['files']}개 / 새 array {stats['new_arrays']}개 / "
+        f"[update_database] 파일 {stats['files']}개 / 새 array {stats['new_arrays']}개 / "
         f"새 catalog 줄 {stats['new_rows']}개 / "
         f"스킵(기존) {stats['skipped_done']} / "
         f"스킵(미완성) {stats['skipped_incomplete']}"
     )
     for stage, seconds in stats["timing"].items():
-        print(f"[ingest] {stage:<10} {seconds:7.3f}s")
-    print(f"[ingest] {'total':<10} {total:7.3f}s")
+        print(f"[update_database] {stage:<10} {seconds:7.3f}s")
+    print(f"[update_database] {'total':<10} {total:7.3f}s")
     return 0
 
 

@@ -1,4 +1,3 @@
-config.toml
 raw/
 database/*
 !database/README.md

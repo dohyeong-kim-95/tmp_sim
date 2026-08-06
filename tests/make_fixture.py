@@ -1,7 +1,8 @@
 """스펙만으로 소형 합성 raw/*.jsonl을 만든다 (실제 데이터 없이 테스트하기 위한 것).
 
-실제 실험의 키 이름/차원/수치는 모르므로 util/ingest.py의 플레이스홀더 상수를
-그대로 따르고, 내용은 스펙에 적힌 성질(볼록 blob, 경계 noise)만 흉내낸다.
+실제 실험의 키 이름/차원/수치는 모르므로 util/_update_database.py 헤더의
+플레이스홀더 상수를 그대로 따르고, 내용은 스펙에 적힌 성질(볼록 blob, 경계
+noise)만 흉내낸다.
 
 포함하는 케이스:
   - 두 줄 분할 기록 (배열 줄 + 스칼라 줄)
@@ -22,7 +23,13 @@ import orjson
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from util.ingest import ARRAY_KEYS, AXIS1_SIZE, LIST_KEYS, SCALAR_KEYS, X_KEY  # noqa: E402
+from util._update_database import (  # noqa: E402
+    ARRAY_KEYS,
+    AXIS1_SIZE,
+    LIST_KEYS,
+    SCALAR_KEYS,
+    X_KEY,
+)
 
 SHAPE = (3, AXIS1_SIZE, 2, 2, 2)   # 내부 5D. 축1이 고정 크기 AXIS1_SIZE.
 LIST_LEN = 3

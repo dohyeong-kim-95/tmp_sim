@@ -12,7 +12,7 @@ from MOCKCalculator import (
     objective_key,
     scalar_bounds,
 )
-from util.ingest import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
+from util._update_database import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
 
 
 @pytest.fixture

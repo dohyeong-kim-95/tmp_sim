@@ -5,7 +5,7 @@ import orjson
 import pytest
 
 from tests.make_fixture import complete_incomplete_iteration, complete_torn_line
-from util.ingest import (
+from util._update_database import (
     ARRAY_KEYS,
     AXIS1_SIZE,
     CATALOG_NAME,
@@ -13,10 +13,10 @@ from util.ingest import (
     LIST_KEYS,
     SCALAR_KEYS,
     X_KEY,
-    IngestError,
+    UpdateDatabaseError,
+    _update_database,
     build_arrays,
     check_list_batch,
-    ingest,
     orient,
     read_run,
 )
@@ -74,9 +74,9 @@ def test_catalog_coordinates_point_into_npz(db_dir):
                 assert 0 <= row["batch_pos"] < npz[key].shape[0]
 
 
-def test_ingest_is_idempotent(raw_dir, db_dir):
+def test_update_database_is_idempotent(raw_dir, db_dir):
     before = read_catalog(db_dir)
-    stats = ingest(raw_dir["raw_dir"], db_dir)
+    stats = _update_database(raw_dir["raw_dir"], db_dir)
     assert stats["new_arrays"] == 0
     assert stats["new_rows"] == 0
     assert stats["skipped_done"] == len(raw_dir["complete_array_ids"])
@@ -88,7 +88,7 @@ def test_incomplete_iteration_skipped_then_picked_up(raw_dir, db_dir):
     assert "run_c:3" not in {r["array_id"] for r in rows}
 
     complete_incomplete_iteration(raw_dir["raw_dir"])
-    stats = ingest(raw_dir["raw_dir"], db_dir)
+    stats = _update_database(raw_dir["raw_dir"], db_dir)
     assert stats["new_arrays"] == 1
     assert stats["skipped_incomplete"] == 0
     assert "run_c:3" in {r["array_id"] for r in read_catalog(db_dir)}
@@ -109,7 +109,7 @@ def test_corrupt_middle_line_aborts(tmp_path, raw_dir):
     broken = tmp_path / "broken.jsonl"
     broken.write_bytes(b"\n".join(lines) + b"\n")
 
-    with pytest.raises(IngestError, match="JSON 파싱 실패"):
+    with pytest.raises(UpdateDatabaseError, match="JSON 파싱 실패"):
         read_run(broken)
 
 
@@ -155,13 +155,13 @@ def test_torn_line_completed_is_picked_up_on_next_run(raw_dir, db_dir):
     rows_before, npz_before = read_catalog(db_dir), npz_count()
     assert "run_d:2" not in {r["array_id"] for r in rows_before}
 
-    stats2 = ingest(raw_dir["raw_dir"], db_dir)
+    stats2 = _update_database(raw_dir["raw_dir"], db_dir)
     assert stats2["new_arrays"] == 0
     assert len(read_catalog(db_dir)) == len(rows_before)
     assert npz_count() == npz_before
 
     codes = complete_torn_line(raw_dir["raw_dir"])
-    stats3 = ingest(raw_dir["raw_dir"], db_dir)
+    stats3 = _update_database(raw_dir["raw_dir"], db_dir)
     assert stats3["new_arrays"] == 1
     assert stats3["new_rows"] == raw_dir["batch"]
     assert npz_count() == npz_before + 1
@@ -176,20 +176,20 @@ def test_torn_line_completed_is_picked_up_on_next_run(raw_dir, db_dir):
 
 def test_build_arrays_rejects_batch_mismatch():
     rec = _minimal_record(batch=2)
-    with pytest.raises(IngestError, match="batch 크기 불일치"):
+    with pytest.raises(UpdateDatabaseError, match="batch 크기 불일치"):
         build_arrays(rec, "t:1", batch=3)
 
 
 def test_build_arrays_rejects_wrong_ndim():
     rec = _minimal_record(batch=2)
     rec[ARRAY_KEYS[0]] = np.zeros((2, 3, AXIS1_SIZE), dtype=bool).tolist()
-    with pytest.raises(IngestError, match="6D"):
+    with pytest.raises(UpdateDatabaseError, match="6D"):
         build_arrays(rec, "t:1", batch=2)
 
 
 def test_check_list_batch_rejects_length_mismatch():
     rec = _minimal_record(batch=2)
-    with pytest.raises(IngestError, match="batch 크기 불일치"):
+    with pytest.raises(UpdateDatabaseError, match="batch 크기 불일치"):
         check_list_batch(rec, "t:1", batch=3)
 
 
@@ -211,8 +211,8 @@ def test_orient_rejects_ambiguous_shapes():
     assert orient(swapped, "t", "k").shape == ok.shape
 
     for shape in [(2, AXIS1_SIZE, AXIS1_SIZE, 2, 2, 2), (2, 3, 3, 2, 2, 2)]:
-        with pytest.raises(IngestError, match="판정 불가"):
+        with pytest.raises(UpdateDatabaseError, match="판정 불가"):
             orient(np.zeros(shape, dtype=bool), "t", "k")
 
-    with pytest.raises(IngestError, match="6D"):
+    with pytest.raises(UpdateDatabaseError, match="6D"):
         orient(np.zeros((2, 3, AXIS1_SIZE), dtype=bool), "t", "k")

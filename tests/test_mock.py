@@ -9,7 +9,7 @@ from MOCKCalculator import (
     erode,
     objective_key,
 )
-from util.ingest import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
+from util._update_database import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
 
 
 @pytest.fixture
