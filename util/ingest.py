@@ -20,18 +20,21 @@ from pathlib import Path
 import numpy as np
 import orjson
 
-# --------------------------------------------------------------------------
-# 플레이스홀더 — 실제 로그의 키 이름/차원으로 교체할 것.
-# --------------------------------------------------------------------------
-X_KEY = "x"
-ARRAY_KEYS = ("yARR1_key", "yARR2_key")      # bool 5D array (batch 포함 6D로 기록됨)
-LIST_KEYS = ("yLST1_key", "yLST2_key")       # x 하나당 list
-SCALAR_KEYS = ("y1_cfg_key", "y2_cfg_key")     # batch 공통 설정값
+if __package__ in (None, ""):   # python util/ingest.py 로 직접 실행한 경우
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# 배열 내부 축1의 고정 크기. 축 0/1 뒤바뀜 판정에 쓰인다.
-AXIS1_SIZE = 4
+from util.config import load_config  # noqa: E402
 
-REQUIRED_KEYS = (X_KEY,) + ARRAY_KEYS + LIST_KEYS + SCALAR_KEYS
+# --------------------------------------------------------------------------
+# 실험 고유 값은 전부 config.toml에서 온다. 여기에 하드코딩하지 않는다.
+# --------------------------------------------------------------------------
+CONFIG = load_config()
+X_KEY = CONFIG.x_key                  # 입력 code batch
+ARRAY_KEYS = CONFIG.array_keys        # bool 5D array (batch 포함 6D로 기록됨)
+LIST_KEYS = CONFIG.list_keys          # x 하나당 list
+SCALAR_KEYS = CONFIG.scalar_keys      # batch 공통 설정값
+AXIS1_SIZE = CONFIG.axis1_size        # 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용)
+REQUIRED_KEYS = CONFIG.required_keys
 
 CATALOG_NAME = "catalog.jsonl"
 ARRAYS_DIRNAME = "arrays"
@@ -221,8 +224,8 @@ def ingest(raw_dir: Path, db_dir: Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="raw/*.jsonl -> database/")
-    ap.add_argument("--raw-dir", default="raw", type=Path)
-    ap.add_argument("--db-dir", default="database", type=Path)
+    ap.add_argument("--raw-dir", default=CONFIG.raw_dir, type=Path)
+    ap.add_argument("--db-dir", default=CONFIG.db_dir, type=Path)
     args = ap.parse_args(argv)
 
     if not args.raw_dir.is_dir():

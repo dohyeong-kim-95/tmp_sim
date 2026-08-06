@@ -30,7 +30,10 @@ TRUE_CALCULATOR 호출은 비싸므로, 축적된 실행 로그로 TRUE를 흉�
 ```
 README.md
 .gitignore
+config.example.toml  # 실험 고유 값의 템플릿 (커밋됨)
+config.toml          # (gitignore) 실제 설정. 예시를 복사해 만든다
 util/
+  config.py          # config.toml 로더
   ingest.py          # raw/*.jsonl -> database/ (A)
 MOCKCalculator.py    # 서로게이트 (B)
 tests/
@@ -52,19 +55,33 @@ database/            # (gitignore, README.md만 예외) ingest 산출물
 `raw/`로부터 재생성 가능한 파생물이다. 단 스키마 문서
 [`database/README.md`](database/README.md)만 `.gitignore` 예외로 커밋된다.
 
-## 3. 플레이스홀더
+## 3. 설정 (`config.toml`)
 
-실제 실험의 키 이름·차원·수치는 이 저장소에 반영되어 있지 않다. 아래 상수는
-전부 **플레이스홀더**이며 실제 로그에 맞춰 고쳐야 한다.
+실제 실험의 키 이름·차원은 코드에 없다. **`config.toml`이 그 값들의 유일한
+출처**이고, 코드는 `util/config.py` 로더를 거쳐서만 읽는다.
 
-| 위치 | 상수 | 의미 |
+```bash
+cp config.example.toml config.toml   # 그 다음 실제 실험 값으로 고친다
+```
+
+`config.toml`이 없으면 로더가 위 명령을 안내하는 에러를 낸다. `config.toml`은
+커밋하지 않는다(`.gitignore`). 담기는 값:
+
+| 섹션 | 항목 | 의미 |
 | --- | --- | --- |
-| `util/ingest.py` | `X_KEY` | X(코드 문자열 batch)의 키 이름 |
-| `util/ingest.py` | `ARRAY_KEYS` | bool 5D array 2개의 키 이름 |
-| `util/ingest.py` | `LIST_KEYS` | list y 2개의 키 이름 (평균이 목적함수) |
-| `util/ingest.py` | `SCALAR_KEYS` | batch 공통 설정값 2개의 키 이름 |
-| `util/ingest.py` | `AXIS1_SIZE` | 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용) |
-| `MOCKCalculator.py` | `MockConfig` | k, trust_dist, min_obs, dilate_d, z, abs_tol |
+| `[keys]` | `x` | X(코드 문자열 batch)의 키 이름 |
+| `[keys]` | `array` | bool 5D array 2개의 키 이름 |
+| `[keys]` | `list` | list y 2개의 키 이름 (평균이 목적함수) |
+| `[keys]` | `scalar` | batch 공통 설정값 2개의 키 이름 |
+| `[ingest]` | `axis1_size` | 배열 내부 축1의 고정 크기 (축 뒤바뀜 판정용) |
+| `[ingest]` | `raw_dir`, `db_dir` | 입출력 디렉터리 |
+
+서로게이트의 **튜닝 파라미터는 여기 들어가지 않는다.** `k`, `trust_dist`,
+`min_obs`, `dilate_d`, `z`, `abs_tol`은 실험이 정해주는 사실이 아니라 탐색 전략의
+선택이라 `MOCKCalculator.MockConfig` dataclass에 남는다.
+
+아래 문서에서는 구체 키 이름 대신 **역할 표기**(`<array key 1>`, `<list key 1>`,
+`<cfg key 1>` …)를 쓴다. 실제 이름은 `config.toml`을 보면 된다.
 
 ## 4. A. ingest 파이프라인
 
@@ -75,8 +92,8 @@ database/            # (gitignore, README.md만 예외) ingest 산출물
 값으로 병합**해서 하나의 레코드로 만든다.
 
 ```jsonl
-{"1": {"x": ["A", "B"], "yARR1_key": [[...]], "yLST1_key": [[...]], "y1_cfg_key": null}}
-{"1": {"x": null,       "yARR1_key": null,    "yLST1_key": null,    "y1_cfg_key": 0.5}}
+{"1": {"<x key>": ["A", "B"], "<array key 1>": [[...]], "<list key 1>": [[...]], "<cfg key 1>": null}}
+{"1": {"<x key>": null,       "<array key 1>": null,    "<list key 1>": null,    "<cfg key 1>": 0.5}}
 ```
 
 run(파일)마다 iteration 번호가 1부터 리셋되므로 고유 키는 **(파일명, iteration)**.
@@ -105,7 +122,7 @@ batch를 풀어 **x 하나당 한 줄**.
 
 ```json
 {"x": "<code>", "array_id": "run_a:1", "batch_pos": 0,
- "yLST1_key": [...], "yLST2_key": [...], "y1_cfg_key": 0.5, "y2_cfg_key": 1.2}
+ "<list key 1>": [...], "<list key 2>": [...], "<cfg key 1>": 0.5, "<cfg key 2>": 1.2}
 ```
 
 같은 x가 여러 번 관측되면 줄이 여러 개 생긴다. 이것이 곧 **noise 반복 관측
@@ -176,16 +193,19 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 | 이름 | 방향 | 뜻 |
 | --- | --- | --- |
 | `array_sum` | 최대화 | `p_arrays`의 합. bool로 반올림한 합보다 gradient-free 탐색에서 신호가 매끄럽다 |
-| `yLST1_key_mean` | 최소화 | 그 x의 `yLST1_key` 리스트 평균 |
-| `yLST2_key_mean` | 최소화 | 그 x의 `yLST2_key` 리스트 평균 |
+| `<list key 1>_mean` | 최소화 | 그 x의 첫 번째 list y의 평균 |
+| `<list key 2>_mean` | 최소화 | 그 x의 두 번째 list y의 평균 |
+
+목적함수 이름은 `objective_key()`가 설정된 키 이름에서 파생시킨다. `config.toml`의
+키 이름을 바꾸면 objectives 이름도 따라 바뀐다.
 
 **가중 결합·스칼라화는 MOCK의 일이 아니라 옵티마이저의 책임이다.** trade-off를
 어떻게 고를지(가중합, Pareto front, constraint 처리)는 탐색 전략의 문제이고,
 서로게이트가 임의의 가중치를 박아 넣으면 그 선택이 숨어버린다. 그래서 MOCK에는
 단일 `score`도 `evaluate()`도 없다.
 
-`y1_cfg_key`/`y2_cfg_key`는 batch 공통 설정값이라 목적함수가 아니다. `result.scalars`에
-따로 담기고, 검증에만 쓰인다.
+`[keys] scalar`의 두 값은 batch 공통 설정값이라 목적함수가 아니다.
+`result.scalars`에 따로 담기고, 검증에만 쓰인다.
 
 ### 검증 계약
 
@@ -212,11 +232,11 @@ JSON 파싱은 `orjson`을 쓴다(성능상 필수로 검증됨).
 ```python
 from MOCKCalculator import MOCKCalculator, MockConfig
 
-mock = MOCKCalculator(db_dir="database", config=MockConfig(k=5, trust_dist=0.05))
+mock = MOCKCalculator(config=MockConfig(k=5, trust_dist=0.05))   # db_dir 기본값은 config.toml
 mock.fit()
 
 r = mock.predict(candidate_code)
-r.objectives   # {"array_sum": ..., "yLST1_key_mean": ..., "yLST2_key_mean": ...}
+r.objectives   # {"array_sum": ..., "<list key 1>_mean": ..., "<list key 2>_mean": ...}
 r.needs_test   # True면 TRUE_CALCULATOR로 실제 평가
 
 print(mock.self_check())
@@ -228,7 +248,7 @@ print(mock.loo_check())
 찾는다. 테스트처럼 optimizer가 없는 환경에서는 생성자로 주입한다.
 
 ```python
-mock = MOCKCalculator("database", code_to_ord=lambda code: [ord(c) for c in code])
+mock = MOCKCalculator(code_to_ord=lambda code: [ord(c) for c in code])
 ```
 
 CLI로도 점검할 수 있다(이쪽은 `optimizer.py`가 필요하다).
@@ -280,16 +300,22 @@ python tests/make_fixture.py raw
 
 `tests/fixture_output/catalog_example.jsonl`은 그 fixture를 ingest한 결과에서
 5줄을 뽑아 커밋한 것이다. 스키마 문서의 예시로 쓰이며, 키 이름이 바뀌었는데
-예시가 따라오지 않으면 테스트가 실패한다.
+예시가 따라오지 않으면 테스트가 실패한다. 구체 키 이름이 적힌 곳은 이 파일과
+`config.example.toml`뿐이고, 문서에 이름이 복제되면 테스트가 잡는다.
 
 `optimizer.py`가 없으므로 테스트는 `code_to_ord` stub(문자→ordinal)을 생성자로
-주입한다.
+주입한다. `config.toml`이 없으면 `conftest.py`가 `config.example.toml`을 복사해
+만든다(만든 경우에만 세션 끝에 지운다). 즉 테스트는 예시 설정이 정한 키 이름
+위에서 돌고, `test_config.py`가 그 사실을 확인한다.
 
 ## 8. 의존성
+
+Python 3.11 이상 (`tomllib`).
 
 ```bash
 pip install numpy orjson        # 런타임
 pip install pytest              # 테스트
+cp config.example.toml config.toml
 ```
 
 `optimizer.py`(`code_to_ord`, `ord_to_code`)는 이 저장소에 없다.

@@ -27,7 +27,14 @@ from typing import Callable
 import numpy as np
 import orjson
 
-from util.ingest import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS, ARRAYS_DIRNAME, CATALOG_NAME
+from util.ingest import (
+    ARRAY_KEYS,
+    ARRAYS_DIRNAME,
+    CATALOG_NAME,
+    CONFIG,
+    LIST_KEYS,
+    SCALAR_KEYS,
+)
 
 ARRAY_SUM_KEY = "array_sum"
 
@@ -138,7 +145,7 @@ def scalar_bounds(values: np.ndarray, cfg: MockConfig) -> tuple[float, float, st
 class MOCKCalculator:
     def __init__(
         self,
-        db_dir: str | Path = "database",
+        db_dir: str | Path | None = None,
         config: MockConfig | None = None,
         code_to_ord: Callable[[str], list[int]] | None = None,
     ):
@@ -148,7 +155,7 @@ class MOCKCalculator:
         불러오는 것만으로는 실패하지 않고, 실제로 ordinal이 필요한 시점에만
         요구된다. 테스트는 stub을 주입해 optimizer 없이 돌린다.
         """
-        self.db_dir = Path(db_dir)
+        self.db_dir = Path(db_dir) if db_dir is not None else CONFIG.db_dir
         self.cfg = config or MockConfig()
         self._code_to_ord = code_to_ord
         self.observed: dict[str, Observed] = {}
@@ -370,7 +377,7 @@ class MOCKCalculator:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="MOCKCalculator fit + 자가 점검")
-    ap.add_argument("--db-dir", default="database")
+    ap.add_argument("--db-dir", default=CONFIG.db_dir)
     ap.add_argument("--k", type=int, default=MockConfig.k)
     ap.add_argument("--trust-dist", type=float, default=MockConfig.trust_dist)
     ap.add_argument("--min-obs", type=int, default=MockConfig.min_obs)
