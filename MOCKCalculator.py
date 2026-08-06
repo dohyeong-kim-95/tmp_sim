@@ -56,6 +56,15 @@ class MockConfig:
 
 
 @dataclass
+class RawObservations:
+    """_load_database()가 디스크에서 읽어온 한 x의 raw 관측. 파생값은 없다."""
+    slices: dict[str, list[np.ndarray]] = field(
+        default_factory=lambda: defaultdict(list)
+    )                                  # array key -> 관측별 5D bool
+    rows: list[dict] = field(default_factory=list)   # 그 x의 catalog 줄들
+
+
+@dataclass
 class Observed:
     """한 x에 대한 모든 반복 관측과 그 합의."""
     x: str
@@ -170,31 +179,59 @@ class MOCKCalculator:
             self._code_to_ord = code_to_ord
         return np.asarray(self._code_to_ord(x), dtype=float)
 
-    # ---- fit -------------------------------------------------------------
-    def fit(self) -> "MOCKCalculator":
-        """database/를 메모리로 올린다. _update_database 재실행 후 다시 호출한다."""
-        rows = self._read_catalog()
+    # ---- 적재 -------------------------------------------------------------
+    def _load_database(self, db_dir: str | Path | None = None) -> dict[str, RawObservations]:
+        """디스크에서 catalog + npz를 읽어 x별 raw 관측으로 모은다.
+
+        디스크를 만지는 건 여기까지다. 합의·ordinal·거리 정규화 같은 파생은
+        fit()이 이 결과 위에서만 한다. 두 단계를 갈라두면 적재를 갈아끼우거나
+        (다른 db_dir, 미리 만든 관측) fit의 모델링만 따로 시험할 수 있다.
+
+        같은 npz를 두 번 열지 않도록 catalog를 array_id로 묶어 파일당 한 번만
+        연다. 반환값의 배열 리스트 순서는 catalog에 나타난 순서다.
+        """
+        db_dir = Path(db_dir) if db_dir is not None else self.db_dir
+        rows = self._read_catalog(db_dir)
         if not rows:
-            raise RuntimeError(f"catalog가 비어 있다: {self.db_dir / CATALOG_NAME}")
+            raise RuntimeError(f"catalog가 비어 있다: {db_dir / CATALOG_NAME}")
 
         by_array: dict[str, list[dict]] = defaultdict(list)
         for row in rows:
             by_array[row["array_id"]].append(row)
 
-        slices: dict[str, dict[str, list[np.ndarray]]] = defaultdict(lambda: defaultdict(list))
-        meta: dict[str, list[dict]] = defaultdict(list)
+        loaded: dict[str, RawObservations] = defaultdict(RawObservations)
         for array_id, group in by_array.items():
-            path = self.db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
+            path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
                 for row in group:
                     pos = row["batch_pos"]
+                    per_x = loaded[row["x"]]
                     for key in ARRAY_KEYS:
-                        slices[row["x"]][key].append(npz[key][pos].astype(bool))
-                    meta[row["x"]].append(row)
+                        per_x.slices[key].append(npz[key][pos].astype(bool))
+                    per_x.rows.append(row)
+        return dict(loaded)
+
+    def _read_catalog(self, db_dir: Path) -> list[dict]:
+        path = db_dir / CATALOG_NAME
+        rows = []
+        with path.open("rb") as f:
+            for line in f:
+                if line.strip():
+                    rows.append(orjson.loads(line))
+        return rows
+
+    # ---- fit -------------------------------------------------------------
+    def fit(self) -> "MOCKCalculator":
+        """database/를 메모리로 올린다. _update_database 재실행 후 다시 호출한다.
+
+        _load_database()가 읽어온 raw 관측에서 합의 배열과 거리 계산에 쓰는
+        ordinal 행렬을 만든다. 여기서부터는 디스크를 보지 않는다.
+        """
+        loaded = self._load_database()
 
         self.observed = {}
-        for x, per_key in slices.items():
-            stacks = {key: np.stack(per_key[key]) for key in ARRAY_KEYS}
+        for x, raw in loaded.items():
+            stacks = {key: np.stack(raw.slices[key]) for key in ARRAY_KEYS}
             p = {key: stacks[key].mean(axis=0) for key in ARRAY_KEYS}
             consensus = {key: p[key] >= 0.5 for key in ARRAY_KEYS}
             self.observed[x] = Observed(
@@ -206,11 +243,11 @@ class MOCKCalculator:
                 p=p,
                 # list y는 원소 단위로 합의하지 않는다. 최적화가 쓰는 건 그 평균뿐.
                 list_means={
-                    key: np.asarray([float(np.mean(r[key])) for r in meta[x]], dtype=float)
+                    key: np.asarray([float(np.mean(r[key])) for r in raw.rows], dtype=float)
                     for key in LIST_KEYS
                 },
                 scalars={
-                    key: np.asarray([r[key] for r in meta[x]], dtype=float)
+                    key: np.asarray([r[key] for r in raw.rows], dtype=float)
                     for key in SCALAR_KEYS
                 },
             )
@@ -220,15 +257,6 @@ class MOCKCalculator:
         spread = self._ords.max(axis=0) - self._ords.min(axis=0)
         self._ranges = np.where(spread > 0, spread, 1.0)  # 상수 변수는 거리에 기여하지 않음
         return self
-
-    def _read_catalog(self) -> list[dict]:
-        path = self.db_dir / CATALOG_NAME
-        rows = []
-        with path.open("rb") as f:
-            for line in f:
-                if line.strip():
-                    rows.append(orjson.loads(line))
-        return rows
 
     # ---- 거리 -------------------------------------------------------------
     def _distances(self, ord_vec: np.ndarray) -> np.ndarray:
