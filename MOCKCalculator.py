@@ -191,13 +191,18 @@ class MOCKCalculator:
         연다. 반환값의 배열 리스트 순서는 catalog에 나타난 순서다.
         """
         db_dir = Path(db_dir) if db_dir is not None else self.db_dir
-        rows = self._read_catalog(db_dir)
-        if not rows:
-            raise RuntimeError(f"catalog가 비어 있다: {db_dir / CATALOG_NAME}")
 
+        # catalog 줄이 담는 건 (array_id, batch_pos) 좌표와 list/scalar 값이다.
+        # 배열 자체는 npz에 있으므로 읽으면서 바로 array_id로 묶어둔다.
+        catalog_path = db_dir / CATALOG_NAME
         by_array: dict[str, list[dict]] = defaultdict(list)
-        for row in rows:
-            by_array[row["array_id"]].append(row)
+        with catalog_path.open("rb") as f:
+            for line in f:
+                if line.strip():
+                    row = orjson.loads(line)
+                    by_array[row["array_id"]].append(row)
+        if not by_array:
+            raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
         loaded: dict[str, RawObservations] = defaultdict(RawObservations)
         for array_id, group in by_array.items():
@@ -210,15 +215,6 @@ class MOCKCalculator:
                         per_x.slices[key].append(npz[key][pos].astype(bool))
                     per_x.rows.append(row)
         return dict(loaded)
-
-    def _read_catalog(self, db_dir: Path) -> list[dict]:
-        path = db_dir / CATALOG_NAME
-        rows = []
-        with path.open("rb") as f:
-            for line in f:
-                if line.strip():
-                    rows.append(orjson.loads(line))
-        return rows
 
     # ---- fit -------------------------------------------------------------
     def fit(self) -> "MOCKCalculator":
