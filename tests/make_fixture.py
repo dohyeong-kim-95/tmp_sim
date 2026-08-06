@@ -149,6 +149,26 @@ def make_fixture(raw_dir: str | Path, batch: int = 2) -> dict:
     }
 
 
+def complete_torn_line(raw_dir: str | Path) -> list[str]:
+    """쓰다 만 마지막 줄을 실험이 마저 쓴 상황을 만든다 (run_d:2가 완성된다).
+
+    잘린 줄을 버리고, 같은 씨앗으로 같은 iteration을 배열 줄 + 스칼라 줄로 다시
+    쓴다. 완성된 코드 목록을 돌려준다.
+    """
+    path = Path(raw_dir) / "run_d.jsonl"
+    data = path.read_bytes()
+    head = data[: data.rfind(b"\n") + 1]     # 개행이 없는 잘린 줄만 떨어져 나간다
+
+    codes = ["CDC", "DAD"]
+    rng = np.random.default_rng(40)          # make_fixture가 쓴 것과 같은 씨앗
+    with path.open("wb") as f:
+        f.write(head)
+        for payload in _iteration_lines(codes, rng, swapped=False):
+            f.write(orjson.dumps({"2": payload}))
+            f.write(b"\n")
+    return codes
+
+
 def complete_incomplete_iteration(raw_dir: str | Path, seed: int = 99) -> None:
     """미완성이던 run_c:3에 스칼라 줄이 뒤늦게 도착한 상황을 만든다."""
     rng = np.random.default_rng(seed)

@@ -4,7 +4,7 @@ import numpy as np
 import orjson
 import pytest
 
-from tests.make_fixture import complete_incomplete_iteration
+from tests.make_fixture import complete_incomplete_iteration, complete_torn_line
 from util.ingest import (
     ARRAY_KEYS,
     AXIS1_SIZE,
@@ -12,7 +12,10 @@ from util.ingest import (
     ARRAYS_DIRNAME,
     LIST_KEYS,
     SCALAR_KEYS,
+    X_KEY,
     IngestError,
+    build_arrays,
+    check_list_batch,
     ingest,
     orient,
     read_run,
@@ -142,6 +145,62 @@ def test_catalog_example_matches_current_schema():
     for row in rows:
         counts[row["x"]] = counts.get(row["x"], 0) + 1
     assert max(counts.values()) >= 2
+
+
+def test_torn_line_completed_is_picked_up_on_next_run(raw_dir, db_dir):
+    """2회차는 아무 변화 없고, 잘린 줄이 완성된 3회차에 그 iteration만 늘어난다."""
+    def npz_count():
+        return len(list((db_dir / ARRAYS_DIRNAME).glob("*.npz")))
+
+    rows_before, npz_before = read_catalog(db_dir), npz_count()
+    assert "run_d:2" not in {r["array_id"] for r in rows_before}
+
+    stats2 = ingest(raw_dir["raw_dir"], db_dir)
+    assert stats2["new_arrays"] == 0
+    assert len(read_catalog(db_dir)) == len(rows_before)
+    assert npz_count() == npz_before
+
+    codes = complete_torn_line(raw_dir["raw_dir"])
+    stats3 = ingest(raw_dir["raw_dir"], db_dir)
+    assert stats3["new_arrays"] == 1
+    assert stats3["new_rows"] == raw_dir["batch"]
+    assert npz_count() == npz_before + 1
+
+    rows_after = read_catalog(db_dir)
+    assert len(rows_after) == len(rows_before) + raw_dir["batch"]
+    added = [r for r in rows_after if r["array_id"] == "run_d:2"]
+    assert [r["x"] for r in added] == codes
+    # 이미 있던 줄은 그대로다.
+    assert rows_after[: len(rows_before)] == rows_before
+
+
+def test_build_arrays_rejects_batch_mismatch():
+    rec = _minimal_record(batch=2)
+    with pytest.raises(IngestError, match="batch 크기 불일치"):
+        build_arrays(rec, "t:1", batch=3)
+
+
+def test_build_arrays_rejects_wrong_ndim():
+    rec = _minimal_record(batch=2)
+    rec[ARRAY_KEYS[0]] = np.zeros((2, 3, AXIS1_SIZE), dtype=bool).tolist()
+    with pytest.raises(IngestError, match="6D"):
+        build_arrays(rec, "t:1", batch=2)
+
+
+def test_check_list_batch_rejects_length_mismatch():
+    rec = _minimal_record(batch=2)
+    with pytest.raises(IngestError, match="batch 크기 불일치"):
+        check_list_batch(rec, "t:1", batch=3)
+
+
+def _minimal_record(batch: int) -> dict:
+    """스키마만 맞춘 최소 레코드. 에러 경로 확인용."""
+    arr = np.zeros((batch, 3, AXIS1_SIZE, 2, 2, 2), dtype=bool).tolist()
+    rec = {X_KEY: ["AAA"] * batch}
+    rec.update({key: arr for key in ARRAY_KEYS})
+    rec.update({key: [[0.0, 0.0] for _ in range(batch)] for key in LIST_KEYS})
+    rec.update({key: 1.0 for key in SCALAR_KEYS})
+    return rec
 
 
 def test_orient_rejects_ambiguous_shapes():

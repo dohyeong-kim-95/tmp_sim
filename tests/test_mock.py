@@ -89,6 +89,57 @@ def test_layer2_for_unobserved_x(mock):
         assert np.array_equal(r_near.arrays[key], p >= 0.5)
 
 
+def test_layer1_never_needs_test(db_dir, code_to_ord):
+    """관측된 x는 최근접 거리가 0이므로 trust_dist를 0으로 조여도 needs_test가 아니다."""
+    for trust_dist in (0.0, 0.05):
+        mock = MOCKCalculator(db_dir, MockConfig(k=3, trust_dist=trust_dist), code_to_ord).fit()
+        for x in mock.observed:
+            r = mock.predict(x)
+            assert r.layer == 1
+            assert r.nearest_dist == 0.0
+            assert not r.needs_test
+
+
+def test_layer2_weight_pulls_prediction_toward_nearest_neighbor(db_dir):
+    """최근접 이웃을 인위적으로 아주 가깝게 두면 예측이 그 이웃 값으로 끌려가야 한다."""
+    anchor, target = "AAA", "ZZZ"
+
+    def code_to_ord_with_near_target(code):
+        if code == target:                       # anchor 바로 옆에 놓는다
+            return [ord(c) + 0.01 for c in anchor]
+        return [ord(c) for c in code]
+
+    mock = MOCKCalculator(
+        db_dir, MockConfig(k=3, trust_dist=10.0), code_to_ord_with_near_target
+    ).fit()
+    assert target not in mock.observed
+
+    pred = mock.predict(target)
+    assert pred.layer == 2
+    assert pred.nearest_dist < 0.01
+
+    anchor_obs = mock.observed[anchor]
+    # 배열은 anchor의 합의와 일치해야 한다.
+    for key in ARRAY_KEYS:
+        assert np.array_equal(pred.arrays[key], anchor_obs.consensus[key])
+
+    # list y 파생 목적값은 anchor 값에 붙는다. 관측값 전체 폭 대비 5% 미만 —
+    # 거리 가중이 아니라 균등 평균이었다면 이 폭의 절반쯤 벗어난다.
+    for key in LIST_KEYS:
+        name = objective_key(key)
+        values = [float(o.list_means[key].mean()) for o in mock.observed.values()]
+        spread = max(values) - min(values)
+        assert spread > 0
+
+        anchor_value = float(anchor_obs.list_means[key].mean())
+        gap = abs(pred.objectives[name] - anchor_value)
+        assert gap < 0.05 * spread
+        assert gap < abs(pred.objectives[name] - np.mean(values))   # 균등 평균보다 가깝다
+        for other_value in values:
+            if abs(other_value - anchor_value) > 1e-9:
+                assert gap < abs(pred.objectives[name] - other_value)
+
+
 def test_trust_dist_controls_needs_test(db_dir, code_to_ord):
     strict = MOCKCalculator(db_dir, MockConfig(k=3, trust_dist=0.0), code_to_ord).fit()
     loose = MOCKCalculator(db_dir, MockConfig(k=3, trust_dist=10.0), code_to_ord).fit()
