@@ -55,8 +55,8 @@ class MockConfig:
 
 
 @dataclass
-class RawObservations:
-    """_load_database()가 디스크에서 읽어온 한 x의 raw 관측. 파생값은 없다."""
+class RawFromDisk:
+    """디스크에서 막 읽어온 한 x의 원본. fit()이 이걸 Observed로 가공한다."""
     slices: dict[str, list[np.ndarray]] = field(
         default_factory=lambda: defaultdict(list)
     )                                  # array key -> 관측별 5D bool
@@ -207,7 +207,7 @@ class MOCKCalculator:
         if not array_id_to_catalog_rows:
             raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
-        loaded = defaultdict(RawObservations)          # x -> RawObservations
+        loaded = defaultdict(RawFromDisk)          # x -> RawFromDisk
         for array_id, group in array_id_to_catalog_rows.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
