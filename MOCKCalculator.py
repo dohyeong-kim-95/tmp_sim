@@ -199,17 +199,17 @@ class MOCKCalculator:
         # catalog 줄이 담는 건 (array_id, batch_pos) 좌표와 list/scalar 값이다.
         # 배열 자체는 npz에 있으므로 읽으면서 바로 array_id로 묶어둔다.
         catalog_path = db_dir / CATALOG_NAME
-        rows_by_npz: dict[str, list[dict]] = defaultdict(list)
+        array_id_to_catalog_rows: dict[str, list[dict]] = defaultdict(list)
         with catalog_path.open("rb") as f:
             for line in f:
                 if line.strip():
                     row = orjson.loads(line)
-                    rows_by_npz[row["array_id"]].append(row)
-        if not rows_by_npz:
+                    array_id_to_catalog_rows[row["array_id"]].append(row)
+        if not array_id_to_catalog_rows:
             raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
         loaded: dict[str, RawObservations] = defaultdict(RawObservations)
-        for array_id, group in rows_by_npz.items():
+        for array_id, group in array_id_to_catalog_rows.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
                 batched = {key: npz[key] for key in ARRAY_KEYS}   # 파일당 1회 압축 해제
