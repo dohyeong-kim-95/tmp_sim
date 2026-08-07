@@ -19,33 +19,33 @@ def mock(db_dir, code_to_ord):
 
 def test_load_database_returns_raw_observations(db_dir, raw_dir, code_to_ord):
     """적재 단계는 디스크에서 읽기만 한다 — 합의/ordinal 같은 파생은 fit의 몫."""
-    slices, rows = MOCKCalculator(db_dir, code_to_ord=code_to_ord)._load_database()
+    loaded = MOCKCalculator(db_dir, code_to_ord=code_to_ord)._load_database()
 
-    assert set(slices) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
-    assert set(rows) == set(slices)
+    assert set(loaded) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
     for code in raw_dir["repeated_codes"]:
-        assert len(rows[code]) == 2                   # run_a + run_b
+        slices, rows = loaded[code]["slices"], loaded[code]["rows"]
+        assert len(rows) == 2                         # run_a + run_b
         for key in ARRAY_KEYS:
-            assert len(slices[code][key]) == len(rows[code])
-            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices[code][key])
+            assert len(slices[key]) == len(rows)
+            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices[key])
         # catalog 줄은 손대지 않고 그대로 실려 온다 (list y도 원본 리스트).
         for key in LIST_KEYS:
-            assert all(isinstance(row[key], list) for row in rows[code])
+            assert all(isinstance(row[key], list) for row in rows)
         for key in SCALAR_KEYS:
-            assert all(isinstance(row[key], float) for row in rows[code])
+            assert all(isinstance(row[key], float) for row in rows)
 
 
 def test_fit_derives_from_what_load_database_returned(db_dir, code_to_ord):
     """fit은 적재 결과만 소비한다 — 주입된 관측이 그대로 합의로 이어진다."""
     mock = MOCKCalculator(db_dir, MockConfig(k=3), code_to_ord)
-    slices, rows = mock._load_database()
+    loaded = mock._load_database()
     mock.fit()
 
-    for code in slices:
+    for code, raw in loaded.items():
         obs = mock.observed[code]
-        assert obs.n_obs == len(rows[code])
+        assert obs.n_obs == len(raw["rows"])
         for key in ARRAY_KEYS:
-            stack = np.stack(slices[code][key])
+            stack = np.stack(raw["slices"][key])
             assert np.array_equal(obs.consensus[key], stack.mean(axis=0) >= 0.5)
 
 
@@ -181,7 +181,7 @@ def test_trust_dist_controls_needs_test(db_dir, code_to_ord):
 
 def test_validate_accepts_consensus(mock):
     for code in mock.observed:
-        assert mock.validate(code, mock.predict(code)).ok
+        assert mock.validate(code, mock.predict(code))["ok"]
 
 
 def test_validate_rejects_array_outside_union(mock, raw_dir):
@@ -191,8 +191,8 @@ def test_validate_rejects_array_outside_union(mock, raw_dir):
     r.arrays[key] = r.arrays[key] | ~mock.observed[code].stacks[key].any(axis=0)
 
     report = mock.validate(code, r)
-    assert not report.ok
-    assert report.arrays[key]["above"] > 0
+    assert not report["ok"]
+    assert report["arrays"][key]["above"] > 0
 
 
 def test_validate_rejects_list_objective_out_of_range(mock, raw_dir):
@@ -202,8 +202,8 @@ def test_validate_rejects_list_objective_out_of_range(mock, raw_dir):
     r.objectives[name] += 1e6
 
     report = mock.validate(code, r)
-    assert not report.ok
-    assert not report.objectives[name]["ok"]
+    assert not report["ok"]
+    assert not report["objectives"][name]["ok"]
 
 
 def test_validate_rejects_unknown_x(mock):

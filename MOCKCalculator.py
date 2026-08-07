@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +31,7 @@ ARRAY_SUM_KEY = "array_sum"
 
 
 def objective_key(list_key):
-    """list y에서 파생된 목적함수 이름."""
+    """list y 키에서 목적함수 이름을 만든다."""
     return f"{list_key}_mean"
 
 
@@ -72,14 +72,6 @@ class MockResult:
     needs_test: bool
 
 
-@dataclass
-class ValidationReport:
-    ok: bool
-    arrays: dict[str, dict] = field(default_factory=dict)
-    objectives: dict[str, dict] = field(default_factory=dict)
-    scalars: dict[str, dict] = field(default_factory=dict)
-
-
 # --------------------------------------------------------------------------
 # 형태학 연산 (검증 계약의 erode/dilate)
 # --------------------------------------------------------------------------
@@ -115,7 +107,7 @@ def erode(mask, d):
 # 검증 계약
 # --------------------------------------------------------------------------
 def array_bounds(stack, cfg):
-    """예측이 들어가야 하는 (하한, 상한) 마스크."""
+    """관측 스택에서 예측이 들어가야 할 (하한, 상한, 규칙명)을 돌려준다."""
     if stack.shape[0] >= cfg.min_obs:
         return stack.all(axis=0), stack.any(axis=0), "intersection/union"
     consensus = stack.mean(axis=0) >= 0.5
@@ -123,7 +115,7 @@ def array_bounds(stack, cfg):
 
 
 def scalar_bounds(values, cfg):
-    """스칼라 값(설정값과 list y 파생 목적함수 공통)의 허용 범위."""
+    """관측값들에서 예측이 들어가야 할 (하한, 상한, 규칙명)을 돌려준다."""
     mean = float(values.mean())
     if values.shape[0] >= cfg.min_obs:
         # 관측 1개면 표본표준편차가 정의되지 않는다.
@@ -158,12 +150,7 @@ class MOCKCalculator:
 
     # ---- 적재 -------------------------------------------------------------
     def _load_database(self, db_dir=None):
-        """디스크에서 catalog + npz를 읽는다. 디스크는 여기까지.
-
-        반환: (slices, rows)
-          slices[x][array key] = 관측별 5D bool 리스트
-          rows[x]              = 그 x의 catalog 줄 리스트
-        """
+        """db_dir을 읽어 x -> {"slices": array key별 관측 리스트, "rows": catalog 줄}을 돌려준다."""
         db_dir = Path(db_dir) if db_dir is not None else self.db_dir
 
         catalog_path = db_dir / CATALOG_NAME
@@ -176,47 +163,41 @@ class MOCKCalculator:
         if not array_id_to_catalog_rows:
             raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
-        slices = defaultdict(lambda: defaultdict(list))   # x -> array key -> 5D bool 리스트
-        rows = defaultdict(list)                          # x -> catalog 줄 리스트
+        loaded = defaultdict(lambda: {"slices": defaultdict(list), "rows": []})
         for array_id, group in array_id_to_catalog_rows.items():
-            path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
-            with np.load(path) as npz:
+            with np.load(db_dir / ARRAYS_DIRNAME / f"{array_id}.npz") as npz:
                 batched = {key: npz[key] for key in ARRAY_KEYS}   # npz[key]는 캐시 안 되므로 루프 밖에서
                 for row in group:
-                    pos = row["batch_pos"]
+                    per_x = loaded[row["x"]]
                     for key in ARRAY_KEYS:
-                        slices[row["x"]][key].append(batched[key][pos].astype(bool))
-                    rows[row["x"]].append(row)
-        return dict(slices), dict(rows)
+                        per_x["slices"][key].append(batched[key][row["batch_pos"]].astype(bool))
+                    per_x["rows"].append(row)
+        return dict(loaded)
 
     # ---- fit -------------------------------------------------------------
     def fit(self):
-        """raw 관측에서 합의 배열과 ordinal 행렬을 만든다. 새 데이터가 오면 재호출."""
-        slices, rows = self._load_database()
-
+        """database/를 x별 Observed와 거리 계산용 ordinal 행렬로 올리고 self를 돌려준다."""
         self.observed = {}
-        for x, per_key in slices.items():
-            stacks = {key: np.stack(per_key[key]) for key in ARRAY_KEYS}
+        for x, raw in self._load_database().items():
+            stacks = {key: np.stack(raw["slices"][key]) for key in ARRAY_KEYS}
             p = {key: stacks[key].mean(axis=0) for key in ARRAY_KEYS}
-            consensus = {key: p[key] >= 0.5 for key in ARRAY_KEYS}
             self.observed[x] = Observed(
                 x=x,
                 ord_vec=self._ord_vec(x),
                 n_obs=stacks[ARRAY_KEYS[0]].shape[0],
                 stacks=stacks,
-                consensus=consensus,
+                consensus={key: p[key] >= 0.5 for key in ARRAY_KEYS},
                 p=p,
                 # list y는 평균만 쓰므로 원소별 합의를 하지 않는다.
                 list_means={
-                    key: np.asarray([float(np.mean(r[key])) for r in rows[x]], dtype=float)
+                    key: np.asarray([float(np.mean(r[key])) for r in raw["rows"]], dtype=float)
                     for key in LIST_KEYS
                 },
                 scalars={
-                    key: np.asarray([r[key] for r in rows[x]], dtype=float)
+                    key: np.asarray([r[key] for r in raw["rows"]], dtype=float)
                     for key in SCALAR_KEYS
                 },
             )
-
         self._x_list = sorted(self.observed)
         self._ords = np.stack([self.observed[x].ord_vec for x in self._x_list])
         spread = self._ords.max(axis=0) - self._ords.min(axis=0)
@@ -225,7 +206,7 @@ class MOCKCalculator:
 
     # ---- 거리 -------------------------------------------------------------
     def _distances(self, ord_vec):
-        """정규화 L1: sum(|a-b| / range) / n_vars."""
+        """ord_vec과 모든 관측 x 사이의 정규화 L1 거리 배열을 돌려준다."""
         return (np.abs(self._ords - ord_vec) / self._ranges).sum(axis=1) / self._ords.shape[1]
 
     # ---- 예측 -------------------------------------------------------------
@@ -287,40 +268,38 @@ class MOCKCalculator:
         )
 
     def objectives(self, x):
-        """목적별 값. array_sum은 최대화, <list key>_mean은 최소화."""
+        """x의 목적별 값 dict. array_sum은 최대화, <list key>_mean은 최소화."""
         return self.predict(x).objectives
 
     # ---- 검증 -------------------------------------------------------------
     def validate(self, x, result):
-        """예측이 x의 실제 관측과 모순되지 않는지. 관측된 x에만."""
+        """관측된 x의 예측을 관측과 대조해 {"ok", "arrays", "objectives", "scalars"}를 돌려준다."""
         obs = self.observed.get(x)
         if obs is None:
             raise KeyError(f"관측이 없는 x는 검증할 수 없다: {x}")
 
-        report = ValidationReport(ok=True)
+        report = {"ok": True, "arrays": {}, "objectives": {}, "scalars": {}}
         for key in ARRAY_KEYS:
             lo, hi, rule = array_bounds(obs.stacks[key], self.cfg)
             pred = result.arrays[key]
-            below = int((lo & ~pred).sum())
-            above = int((pred & ~hi).sum())
-            ok = below == 0 and above == 0
-            report.arrays[key] = {
-                "ok": ok, "below": below, "above": above,
+            below, above = int((lo & ~pred).sum()), int((pred & ~hi).sum())
+            report["arrays"][key] = {
+                "ok": below == 0 and above == 0, "below": below, "above": above,
                 "n_obs": obs.n_obs, "rule": rule,
             }
-            report.ok &= ok
-
         for key in LIST_KEYS:
-            name = objective_key(key)
-            report.objectives[name] = self._check_scalar(
-                obs.list_means[key], result.objectives[name], obs.n_obs
+            report["objectives"][objective_key(key)] = self._check_scalar(
+                obs.list_means[key], result.objectives[objective_key(key)], obs.n_obs
             )
-            report.ok &= report.objectives[name]["ok"]
         for key in SCALAR_KEYS:
-            report.scalars[key] = self._check_scalar(
+            report["scalars"][key] = self._check_scalar(
                 obs.scalars[key], result.scalars[key], obs.n_obs
             )
-            report.ok &= report.scalars[key]["ok"]
+        report["ok"] = all(
+            entry["ok"]
+            for section in ("arrays", "objectives", "scalars")
+            for entry in report[section].values()
+        )
         return report
 
     def _check_scalar(self, values, value, n_obs):
@@ -330,9 +309,10 @@ class MOCKCalculator:
             "lo": lo, "hi": hi, "n_obs": n_obs, "rule": rule,
         }
 
+    # ---- 자가점검 ---------------------------------------------------------
     def self_check(self):
-        """합의가 자기 관측 범위를 통과하는지. 구조적으로 100%여야 한다."""
-        failures = [x for x in self._x_list if not self.validate(x, self.predict(x)).ok]
+        """모든 관측 x의 층1 예측이 자기 관측 범위를 통과하는지 요약 dict로 돌려준다."""
+        failures = [x for x in self._x_list if not self.validate(x, self.predict(x))["ok"]]
         return {
             "n_x": len(self._x_list),
             "n_fail": len(failures),
@@ -341,7 +321,7 @@ class MOCKCalculator:
         }
 
     def loo_check(self, limit=None):
-        """leave-one-out으로 층2의 예측력을 잰다."""
+        """각 x를 이웃 풀에서 빼고 층2로 예측해 그 예측력을 요약 dict로 돌려준다."""
         if len(self._x_list) < 2:
             return {"n_x": len(self._x_list), "note": "관측 x가 2개 미만이라 생략"}
 
@@ -349,7 +329,7 @@ class MOCKCalculator:
         n_pass, n_needs_test, agree = 0, 0, []
         for i, x in enumerate(targets):
             pred = self._predict_layer2(x, self.observed[x].ord_vec, exclude=i)
-            if self.validate(x, pred).ok:
+            if self.validate(x, pred)["ok"]:
                 n_pass += 1
             n_needs_test += int(pred.needs_test)
             for key in ARRAY_KEYS:

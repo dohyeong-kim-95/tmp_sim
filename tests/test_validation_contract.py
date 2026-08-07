@@ -58,9 +58,9 @@ def test_small_sample_rejects_prediction_below_eroded_lower_bound(mock):
 
     pred.arrays[key] = missing
     report = mock.validate(x, pred)
-    assert not report.ok
-    assert report.arrays[key]["below"] > 0
-    assert report.arrays[key]["rule"].startswith("erode/dilate")
+    assert not report["ok"]
+    assert report["arrays"][key]["below"] > 0
+    assert report["arrays"][key]["rule"].startswith("erode/dilate")
 
 
 def test_small_sample_rejects_prediction_above_dilated_upper_bound(mock):
@@ -73,8 +73,8 @@ def test_small_sample_rejects_prediction_above_dilated_upper_bound(mock):
 
     pred.arrays[key] = extra
     report = mock.validate(x, pred)
-    assert not report.ok
-    assert report.arrays[key]["above"] > 0
+    assert not report["ok"]
+    assert report["arrays"][key]["above"] > 0
 
 
 def test_small_sample_scalar_uses_abs_tol(mock):
@@ -91,11 +91,11 @@ def test_small_sample_scalar_uses_abs_tol(mock):
     name = objective_key(LIST_KEYS[0])
     inside = mock.predict(x)
     inside.objectives[name] += cfg.abs_tol * 0.5
-    assert mock.validate(x, inside).ok
+    assert mock.validate(x, inside)["ok"]
 
     outside = mock.predict(x)
     outside.objectives[name] += cfg.abs_tol * 1.5
-    assert not mock.validate(x, outside).objectives[name]["ok"]
+    assert not mock.validate(x, outside)["objectives"][name]["ok"]
 
 
 # --- 2. 대표본 분기과 그 경계 ---------------------------------------------
@@ -136,13 +136,13 @@ def test_envelope_rejects_prediction_outside_union(db_dir, code_to_ord):
     stack = mock.observed[x].stacks[key]
 
     pred = mock.predict(x)
-    assert mock.validate(x, pred).ok            # 합의는 교집합~합집합 사이
+    assert mock.validate(x, pred)["ok"]            # 합의는 교집합~합집합 사이
 
     pred.arrays[key] = pred.arrays[key] | ~stack.any(axis=0)
     report = mock.validate(x, pred)
-    assert not report.ok
-    assert report.arrays[key]["rule"] == "intersection/union"
-    assert report.arrays[key]["above"] > 0
+    assert not report["ok"]
+    assert report["arrays"][key]["rule"] == "intersection/union"
+    assert report["arrays"][key]["above"] > 0
 
 
 def test_envelope_rejects_prediction_missing_intersection(db_dir, code_to_ord):
@@ -158,5 +158,5 @@ def test_envelope_rejects_prediction_missing_intersection(db_dir, code_to_ord):
     pred.arrays[key] = dropped
 
     report = mock.validate(x, pred)
-    assert not report.ok
-    assert report.arrays[key]["below"] > 0
+    assert not report["ok"]
+    assert report["arrays"][key]["below"] > 0
