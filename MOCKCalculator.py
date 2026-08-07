@@ -1,18 +1,10 @@
-"""TRUE_CALCULATOR의 서로게이트.
+"""TRUE_CALCULATOR의 서로게이트. fit()이 database/를 메모리에 올린다.
 
-fit()이 database/를 통째로 메모리에 올리는 스냅샷 방식. 2층 구조:
-  층1 (관측된 x)   반복 관측을 원소별 다수결로 합쳐 합의 배열을 반환
-  층2 (미관측 x)   ordinal 공간의 정규화 L1 거리로 k최근접을 찾아 거리 가중 평균
+  층1 (관측된 x)   반복 관측의 원소별 다수결
+  층2 (미관측 x)   ordinal 정규화 L1 거리로 k최근접 가중 평균
 
-목적은 다목적(multi-objective)이다:
-  array_sum        p_arrays의 합 — 최대화
-  <list key>_mean  각 x의 list y의 평균 — 최소화
-
-MOCK은 이들을 하나의 점수로 합치지 않는다. 가중 결합/스칼라화는 trade-off를
-고르는 일이고 그건 옵티마이저의 책임이다. MOCK은 result.objectives로
-목적별 값만 노출한다.
-
-needs_test=True인 후보는 서로게이트를 믿지 말고 TRUE_CALCULATOR로 실제 평가한다.
+다목적이라 하나의 점수로 합치지 않는다 — 가중 결합은 옵티마이저 책임.
+needs_test=True면 TRUE_CALCULATOR로 실제 평가한다.
 """
 
 from __future__ import annotations
@@ -56,7 +48,7 @@ class MockConfig:
 
 @dataclass
 class RawFromDisk:
-    """디스크에서 막 읽어온 한 x의 원본. fit()이 이걸 Observed로 가공한다."""
+    """디스크에서 막 읽어온 한 x의 원본. fit()이 Observed로 가공한다."""
     slices: dict[str, list[np.ndarray]] = field(
         default_factory=lambda: defaultdict(list)
     )                                  # array key -> 관측별 5D bool
@@ -101,7 +93,7 @@ class ValidationReport:
 # 형태학 연산 (검증 계약의 erode/dilate)
 # --------------------------------------------------------------------------
 def _shift(mask, axis, step):
-    """경계를 False로 채우는 시프트. np.roll은 wrap되므로 쓰지 않는다."""
+    """경계를 False로 채우는 시프트. np.roll은 wrap되어 못 쓴다."""
     out = np.zeros_like(mask)
     src = [slice(None)] * mask.ndim
     dst = [slice(None)] * mask.ndim
@@ -143,7 +135,7 @@ def scalar_bounds(values, cfg):
     """스칼라 값(설정값과 list y 파생 목적함수 공통)의 허용 범위."""
     mean = float(values.mean())
     if values.shape[0] >= cfg.min_obs:
-        # 관측이 1개면 표본표준편차가 정의되지 않는다(min_obs=1 설정에서 발생).
+        # 관측 1개면 표본표준편차가 정의되지 않는다.
         sigma = float(values.std(ddof=1)) if values.shape[0] > 1 else 0.0
         return mean - cfg.z * sigma, mean + cfg.z * sigma, f"mean±{cfg.z}σ"
     return mean - cfg.abs_tol, mean + cfg.abs_tol, f"mean±{cfg.abs_tol}"
@@ -157,18 +149,13 @@ class MOCKCalculator:
         config=None,
         code_to_ord=None,
     ):
-        """code_to_ord를 넘기지 않으면 optimizer.code_to_ord를 늦게 import한다.
-
-        optimizer.py는 이 저장소 밖에 있다(GA/SA 본체). 늦은 import라서 모듈을
-        불러오는 것만으로는 실패하지 않고, 실제로 ordinal이 필요한 시점에만
-        요구된다. 테스트는 stub을 주입해 optimizer 없이 돌린다.
-        """
+        """code_to_ord 미지정 시 optimizer에서 늦게 import한다 (테스트는 stub 주입)."""
         self.db_dir = Path(db_dir) if db_dir is not None else DB_DIR
         self.cfg = config or MockConfig()
         self._code_to_ord = code_to_ord
         self.observed = {}          # x -> Observed
-        self._x_list = []           # 정렬된 관측 x 목록. _ords의 행 순서
-        self._ords = None           # (n_x, n_vars) ordinal 행렬. fit()에서 채운다
+        self._x_list = []           # 정렬된 x 목록. _ords의 행 순서
+        self._ords = None           # (n_x, n_vars). fit()이 채운다
         self._ranges = None         # (n_vars,) 거리 정규화용
 
     def _ord_vec(self, x):
@@ -180,23 +167,9 @@ class MOCKCalculator:
 
     # ---- 적재 -------------------------------------------------------------
     def _load_database(self, db_dir=None):
-        """디스크에서 catalog + npz를 읽어 x별 raw 관측으로 모은다.
-
-        디스크를 만지는 건 여기까지다. 합의·ordinal·거리 정규화 같은 파생은
-        fit()이 이 결과 위에서만 한다. 두 단계를 갈라두면 적재를 갈아끼우거나
-        (다른 db_dir, 미리 만든 관측) fit의 모델링만 따로 시험할 수 있다.
-
-        catalog를 array_id로 묶는 건 npz 하나를 **파일당 한 번만 압축 해제**하기
-        위해서다. NpzFile은 캐시하지 않아서 npz[key]가 매번 배열 전체를 다시 푼다.
-        그래서 묶어서 읽되 npz[key]도 batch 루프 밖으로 빼야 한다 — 둘 중 하나만
-        해서는 batch배 만큼의 중복 압축 해제가 그대로 남는다.
-
-        반환값의 배열 리스트 순서는 catalog에 나타난 순서다.
-        """
+        """디스크에서 catalog + npz를 읽어 x별로 모은다. 디스크는 여기까지."""
         db_dir = Path(db_dir) if db_dir is not None else self.db_dir
 
-        # catalog 줄이 담는 건 (array_id, batch_pos) 좌표와 list/scalar 값이다.
-        # 배열 자체는 npz에 있으므로 읽으면서 바로 array_id로 묶어둔다.
         catalog_path = db_dir / CATALOG_NAME
         array_id_to_catalog_rows = defaultdict(list)   # array_id -> catalog 줄들
         with catalog_path.open("rb") as f:
@@ -211,7 +184,7 @@ class MOCKCalculator:
         for array_id, group in array_id_to_catalog_rows.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
-                batched = {key: npz[key] for key in ARRAY_KEYS}   # 파일당 1회 압축 해제
+                batched = {key: npz[key] for key in ARRAY_KEYS}   # npz[key]는 캐시 안 되므로 루프 밖에서
                 for row in group:
                     pos = row["batch_pos"]
                     per_x = loaded[row["x"]]
@@ -222,11 +195,7 @@ class MOCKCalculator:
 
     # ---- fit -------------------------------------------------------------
     def fit(self):
-        """database/를 메모리로 올린다. _update_database 재실행 후 다시 호출한다.
-
-        _load_database()가 읽어온 raw 관측에서 합의 배열과 거리 계산에 쓰는
-        ordinal 행렬을 만든다. 여기서부터는 디스크를 보지 않는다.
-        """
+        """raw 관측에서 합의 배열과 ordinal 행렬을 만든다. 새 데이터가 오면 재호출."""
         loaded = self._load_database()
 
         self.observed = {}
@@ -241,7 +210,7 @@ class MOCKCalculator:
                 stacks=stacks,
                 consensus=consensus,
                 p=p,
-                # list y는 원소 단위로 합의하지 않는다. 최적화가 쓰는 건 그 평균뿐.
+                # list y는 평균만 쓰므로 원소별 합의를 하지 않는다.
                 list_means={
                     key: np.asarray([float(np.mean(r[key])) for r in raw.rows], dtype=float)
                     for key in LIST_KEYS
@@ -255,7 +224,7 @@ class MOCKCalculator:
         self._x_list = sorted(self.observed)
         self._ords = np.stack([self.observed[x].ord_vec for x in self._x_list])
         spread = self._ords.max(axis=0) - self._ords.min(axis=0)
-        self._ranges = np.where(spread > 0, spread, 1.0)  # 상수 변수는 거리에 기여하지 않음
+        self._ranges = np.where(spread > 0, spread, 1.0)  # 상수 변수는 거리 기여 0
         return self
 
     # ---- 거리 -------------------------------------------------------------
@@ -322,15 +291,12 @@ class MOCKCalculator:
         )
 
     def objectives(self, x):
-        """목적별 값. array_sum은 최대화, <list key>_mean은 최소화 대상.
-
-        가중 결합은 하지 않는다 — trade-off를 고르는 건 옵티마이저의 책임이다.
-        """
+        """목적별 값. array_sum은 최대화, <list key>_mean은 최소화."""
         return self.predict(x).objectives
 
     # ---- 검증 -------------------------------------------------------------
     def validate(self, x, result):
-        """예측이 x의 실제 관측과 모순되지 않는지 본다. 관측된 x에만 쓸 수 있다."""
+        """예측이 x의 실제 관측과 모순되지 않는지. 관측된 x에만."""
         obs = self.observed.get(x)
         if obs is None:
             raise KeyError(f"관측이 없는 x는 검증할 수 없다: {x}")
@@ -348,7 +314,6 @@ class MOCKCalculator:
             }
             report.ok &= ok
 
-        # list y 파생 목적함수와 batch 설정값은 같은 스칼라 규칙을 쓴다.
         for key in LIST_KEYS:
             name = objective_key(key)
             report.objectives[name] = self._check_scalar(
