@@ -47,15 +47,6 @@ class MockConfig:
 
 
 @dataclass
-class RawFromDisk:
-    """디스크에서 막 읽어온 한 x의 원본. fit()이 Observed로 가공한다."""
-    slices: dict[str, list[np.ndarray]] = field(
-        default_factory=lambda: defaultdict(list)
-    )                                  # array key -> 관측별 5D bool
-    rows: list[dict] = field(default_factory=list)   # 그 x의 catalog 줄들
-
-
-@dataclass
 class Observed:
     """한 x에 대한 모든 반복 관측과 그 합의."""
     x: str
@@ -167,7 +158,12 @@ class MOCKCalculator:
 
     # ---- 적재 -------------------------------------------------------------
     def _load_database(self, db_dir=None):
-        """디스크에서 catalog + npz를 읽어 x별로 모은다. 디스크는 여기까지."""
+        """디스크에서 catalog + npz를 읽는다. 디스크는 여기까지.
+
+        반환: (slices, rows)
+          slices[x][array key] = 관측별 5D bool 리스트
+          rows[x]              = 그 x의 catalog 줄 리스트
+        """
         db_dir = Path(db_dir) if db_dir is not None else self.db_dir
 
         catalog_path = db_dir / CATALOG_NAME
@@ -180,27 +176,27 @@ class MOCKCalculator:
         if not array_id_to_catalog_rows:
             raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
-        loaded = defaultdict(RawFromDisk)          # x -> RawFromDisk
+        slices = defaultdict(lambda: defaultdict(list))   # x -> array key -> 5D bool 리스트
+        rows = defaultdict(list)                          # x -> catalog 줄 리스트
         for array_id, group in array_id_to_catalog_rows.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
                 batched = {key: npz[key] for key in ARRAY_KEYS}   # npz[key]는 캐시 안 되므로 루프 밖에서
                 for row in group:
                     pos = row["batch_pos"]
-                    per_x = loaded[row["x"]]
                     for key in ARRAY_KEYS:
-                        per_x.slices[key].append(batched[key][pos].astype(bool))
-                    per_x.rows.append(row)
-        return dict(loaded)
+                        slices[row["x"]][key].append(batched[key][pos].astype(bool))
+                    rows[row["x"]].append(row)
+        return dict(slices), dict(rows)
 
     # ---- fit -------------------------------------------------------------
     def fit(self):
         """raw 관측에서 합의 배열과 ordinal 행렬을 만든다. 새 데이터가 오면 재호출."""
-        loaded = self._load_database()
+        slices, rows = self._load_database()
 
         self.observed = {}
-        for x, raw in loaded.items():
-            stacks = {key: np.stack(raw.slices[key]) for key in ARRAY_KEYS}
+        for x, per_key in slices.items():
+            stacks = {key: np.stack(per_key[key]) for key in ARRAY_KEYS}
             p = {key: stacks[key].mean(axis=0) for key in ARRAY_KEYS}
             consensus = {key: p[key] >= 0.5 for key in ARRAY_KEYS}
             self.observed[x] = Observed(
@@ -212,11 +208,11 @@ class MOCKCalculator:
                 p=p,
                 # list y는 평균만 쓰므로 원소별 합의를 하지 않는다.
                 list_means={
-                    key: np.asarray([float(np.mean(r[key])) for r in raw.rows], dtype=float)
+                    key: np.asarray([float(np.mean(r[key])) for r in rows[x]], dtype=float)
                     for key in LIST_KEYS
                 },
                 scalars={
-                    key: np.asarray([r[key] for r in raw.rows], dtype=float)
+                    key: np.asarray([r[key] for r in rows[x]], dtype=float)
                     for key in SCALAR_KEYS
                 },
             )

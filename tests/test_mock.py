@@ -19,33 +19,33 @@ def mock(db_dir, code_to_ord):
 
 def test_load_database_returns_raw_observations(db_dir, raw_dir, code_to_ord):
     """적재 단계는 디스크에서 읽기만 한다 — 합의/ordinal 같은 파생은 fit의 몫."""
-    loaded = MOCKCalculator(db_dir, code_to_ord=code_to_ord)._load_database()
+    slices, rows = MOCKCalculator(db_dir, code_to_ord=code_to_ord)._load_database()
 
-    assert set(loaded) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
+    assert set(slices) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
+    assert set(rows) == set(slices)
     for code in raw_dir["repeated_codes"]:
-        raw = loaded[code]
-        assert len(raw.rows) == 2                     # run_a + run_b
+        assert len(rows[code]) == 2                   # run_a + run_b
         for key in ARRAY_KEYS:
-            assert len(raw.slices[key]) == len(raw.rows)
-            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in raw.slices[key])
+            assert len(slices[code][key]) == len(rows[code])
+            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices[code][key])
         # catalog 줄은 손대지 않고 그대로 실려 온다 (list y도 원본 리스트).
         for key in LIST_KEYS:
-            assert all(isinstance(row[key], list) for row in raw.rows)
+            assert all(isinstance(row[key], list) for row in rows[code])
         for key in SCALAR_KEYS:
-            assert all(isinstance(row[key], float) for row in raw.rows)
+            assert all(isinstance(row[key], float) for row in rows[code])
 
 
 def test_fit_derives_from_what_load_database_returned(db_dir, code_to_ord):
     """fit은 적재 결과만 소비한다 — 주입된 관측이 그대로 합의로 이어진다."""
     mock = MOCKCalculator(db_dir, MockConfig(k=3), code_to_ord)
-    loaded = mock._load_database()
+    slices, rows = mock._load_database()
     mock.fit()
 
-    for code, raw in loaded.items():
+    for code in slices:
         obs = mock.observed[code]
-        assert obs.n_obs == len(raw.rows)
+        assert obs.n_obs == len(rows[code])
         for key in ARRAY_KEYS:
-            stack = np.stack(raw.slices[key])
+            stack = np.stack(slices[code][key])
             assert np.array_equal(obs.consensus[key], stack.mean(axis=0) >= 0.5)
 
 
