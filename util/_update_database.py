@@ -61,7 +61,7 @@ class UpdateDatabaseError(RuntimeError):
 # --------------------------------------------------------------------------
 # 읽기
 # --------------------------------------------------------------------------
-def load_done_ids(catalog_path: Path) -> set[str]:
+def load_done_ids(catalog_path):
     """catalog에 이미 기록된 array_id 집합. 멱등성의 근거."""
     done = set()
     if not catalog_path.exists():
@@ -73,7 +73,7 @@ def load_done_ids(catalog_path: Path) -> set[str]:
     return done
 
 
-def read_run(path: Path) -> dict[int, dict]:
+def read_run(path):
     """한 run 파일을 iteration -> 병합된 레코드로 읽는다.
 
     실험이 실시간으로 append하는 파일이라 마지막 줄은 쓰다 만 상태일 수 있다.
@@ -109,7 +109,7 @@ def read_run(path: Path) -> dict[int, dict]:
 # --------------------------------------------------------------------------
 # 정규화
 # --------------------------------------------------------------------------
-def orient(arr: np.ndarray, array_id: str, key: str) -> np.ndarray:
+def orient(arr, array_id, key):
     """내부 축 0/1이 뒤바뀐 run을 통일한다.
 
     기록 배열은 (batch, i0, i1, i2, i3, i4). 정상이면 i1 == AXIS1_SIZE.
@@ -130,7 +130,7 @@ def orient(arr: np.ndarray, array_id: str, key: str) -> np.ndarray:
     )
 
 
-def build_arrays(rec: dict, array_id: str, batch: int) -> dict[str, np.ndarray]:
+def build_arrays(rec, array_id, batch):
     """레코드의 배열 키들을 bool + 정상 축 방향으로 변환."""
     out = {}
     for key in ARRAY_KEYS:
@@ -144,7 +144,7 @@ def build_arrays(rec: dict, array_id: str, batch: int) -> dict[str, np.ndarray]:
     return out
 
 
-def build_rows(rec: dict, array_id: str) -> list[dict]:
+def build_rows(rec, array_id):
     """batch를 풀어 x 하나당 catalog 한 줄."""
     xs = rec[X_KEY]
     rows = []
@@ -158,7 +158,7 @@ def build_rows(rec: dict, array_id: str) -> list[dict]:
     return rows
 
 
-def check_list_batch(rec: dict, array_id: str, batch: int) -> None:
+def check_list_batch(rec, array_id, batch):
     for key in LIST_KEYS:
         n = len(rec[key])
         if n != batch:
@@ -170,7 +170,7 @@ def check_list_batch(rec: dict, array_id: str, batch: int) -> None:
 # --------------------------------------------------------------------------
 # 파이프라인
 # --------------------------------------------------------------------------
-def _update_database(raw_dir: Path, db_dir: Path) -> dict:
+def _update_database(raw_dir, db_dir):
     catalog_path = db_dir / CATALOG_NAME
     arrays_dir = db_dir / ARRAYS_DIRNAME
     arrays_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +236,7 @@ def _update_database(raw_dir: Path, db_dir: Path) -> dict:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     ap = argparse.ArgumentParser(description="raw/*.jsonl -> database/")
     ap.add_argument("--raw-dir", default=RAW_DIR, type=Path)
     ap.add_argument("--db-dir", default=DB_DIR, type=Path)

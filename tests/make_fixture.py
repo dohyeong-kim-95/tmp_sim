@@ -40,17 +40,17 @@ RUN_C_CODES = ["EAB", "ACE", "BDA", "CCC"]
 RUN_D_CODES = ["DDE", "EEA"]
 
 
-def code_to_ord_stub(code: str) -> list[int]:
+def code_to_ord_stub(code):
     """테스트용 stub. 실제 optimizer.code_to_ord 자리에 주입한다."""
     return [ord(c) for c in code]
 
 
-def _seed(code: str) -> int:
+def _seed(code):
     # hash()는 실행마다 달라지므로 쓰지 않는다.
     return int.from_bytes(code.encode(), "big") % (2**31)
 
 
-def _blob(code: str) -> tuple[np.ndarray, np.ndarray, float]:
+def _blob(code):
     """코드마다 결정적인 볼록 blob (구 형태)."""
     rng = np.random.default_rng(_seed(code))
     center = np.array(SHAPE, dtype=float) / 2 - 0.5 + rng.uniform(-0.4, 0.4, size=len(SHAPE))
@@ -59,7 +59,7 @@ def _blob(code: str) -> tuple[np.ndarray, np.ndarray, float]:
     return dist <= radius, dist, radius
 
 
-def _observe(code: str, rng: np.random.Generator) -> np.ndarray:
+def _observe(code, rng):
     """한 번의 관측. 경계 원소 1~2개가 흔들린다(noise)."""
     base, dist, radius = _blob(code)
     boundary = np.flatnonzero(np.abs(dist.ravel() - radius) <= 0.7)
@@ -70,13 +70,13 @@ def _observe(code: str, rng: np.random.Generator) -> np.ndarray:
     return obs.reshape(SHAPE)
 
 
-def _list_y(code: str, rng: np.random.Generator, offset: float) -> list[float]:
+def _list_y(code, rng, offset):
     """평균이 최소화 대상인 list y. 코드에 따라 값이 달라져야 층2가 의미를 갖는다."""
     base = offset + sum(code_to_ord_stub(code)) / 100.0
     return [round(float(v), 6) for v in rng.normal(base, 0.02, size=LIST_LEN)]
 
 
-def _iteration_lines(codes, rng, swapped: bool) -> list[dict]:
+def _iteration_lines(codes, rng, swapped):
     """한 iteration을 배열 줄 + 스칼라 줄로 쪼갠다."""
     array_line = {X_KEY: list(codes)}
     for ki, key in enumerate(ARRAY_KEYS):
@@ -98,7 +98,7 @@ def _iteration_lines(codes, rng, swapped: bool) -> list[dict]:
     return [array_line, scalar_line]
 
 
-def _write(path: Path, lines: list[tuple[int, dict]], torn: bytes | None = None) -> None:
+def _write(path, lines, torn=None):
     with path.open("wb") as f:
         for iteration, payload in lines:
             f.write(orjson.dumps({str(iteration): payload}))
@@ -107,7 +107,7 @@ def _write(path: Path, lines: list[tuple[int, dict]], torn: bytes | None = None)
             f.write(torn)  # 개행 없이 잘린 줄 — 실험이 아직 쓰는 중
 
 
-def make_fixture(raw_dir: str | Path, batch: int = 2) -> dict:
+def make_fixture(raw_dir, batch=2):
     """raw_dir에 합성 run 파일들을 쓰고, 테스트가 기대값으로 쓸 요약을 돌려준다."""
     raw_dir = Path(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -156,7 +156,7 @@ def make_fixture(raw_dir: str | Path, batch: int = 2) -> dict:
     }
 
 
-def complete_torn_line(raw_dir: str | Path) -> list[str]:
+def complete_torn_line(raw_dir):
     """쓰다 만 마지막 줄을 실험이 마저 쓴 상황을 만든다 (run_d:2가 완성된다).
 
     잘린 줄을 버리고, 같은 씨앗으로 같은 iteration을 배열 줄 + 스칼라 줄로 다시
@@ -176,7 +176,7 @@ def complete_torn_line(raw_dir: str | Path) -> list[str]:
     return codes
 
 
-def complete_incomplete_iteration(raw_dir: str | Path, seed: int = 99) -> None:
+def complete_incomplete_iteration(raw_dir, seed=99):
     """미완성이던 run_c:3에 스칼라 줄이 뒤늦게 도착한 상황을 만든다."""
     rng = np.random.default_rng(seed)
     scalar_line = _iteration_lines(["ABA", "BAB"], rng, swapped=False)[1]

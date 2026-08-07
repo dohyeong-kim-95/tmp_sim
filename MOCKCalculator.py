@@ -22,7 +22,6 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import orjson
@@ -39,7 +38,7 @@ from util._update_database import (
 ARRAY_SUM_KEY = "array_sum"
 
 
-def objective_key(list_key: str) -> str:
+def objective_key(list_key):
     """list y에서 파생된 목적함수 이름."""
     return f"{list_key}_mean"
 
@@ -101,7 +100,7 @@ class ValidationReport:
 # --------------------------------------------------------------------------
 # 형태학 연산 (검증 계약의 erode/dilate)
 # --------------------------------------------------------------------------
-def _shift(mask: np.ndarray, axis: int, step: int) -> np.ndarray:
+def _shift(mask, axis, step):
     """경계를 False로 채우는 시프트. np.roll은 wrap되므로 쓰지 않는다."""
     out = np.zeros_like(mask)
     src = [slice(None)] * mask.ndim
@@ -114,7 +113,7 @@ def _shift(mask: np.ndarray, axis: int, step: int) -> np.ndarray:
     return out
 
 
-def dilate(mask: np.ndarray, d: int) -> np.ndarray:
+def dilate(mask, d):
     out = mask
     for _ in range(d):
         acc = out.copy()
@@ -125,14 +124,14 @@ def dilate(mask: np.ndarray, d: int) -> np.ndarray:
     return out
 
 
-def erode(mask: np.ndarray, d: int) -> np.ndarray:
+def erode(mask, d):
     return ~dilate(~mask, d)
 
 
 # --------------------------------------------------------------------------
 # 검증 계약
 # --------------------------------------------------------------------------
-def array_bounds(stack: np.ndarray, cfg: MockConfig) -> tuple[np.ndarray, np.ndarray, str]:
+def array_bounds(stack, cfg):
     """예측이 들어가야 하는 (하한, 상한) 마스크."""
     if stack.shape[0] >= cfg.min_obs:
         return stack.all(axis=0), stack.any(axis=0), "intersection/union"
@@ -140,7 +139,7 @@ def array_bounds(stack: np.ndarray, cfg: MockConfig) -> tuple[np.ndarray, np.nda
     return erode(consensus, cfg.dilate_d), dilate(consensus, cfg.dilate_d), f"erode/dilate(d={cfg.dilate_d})"
 
 
-def scalar_bounds(values: np.ndarray, cfg: MockConfig) -> tuple[float, float, str]:
+def scalar_bounds(values, cfg):
     """스칼라 값(설정값과 list y 파생 목적함수 공통)의 허용 범위."""
     mean = float(values.mean())
     if values.shape[0] >= cfg.min_obs:
@@ -154,9 +153,9 @@ def scalar_bounds(values: np.ndarray, cfg: MockConfig) -> tuple[float, float, st
 class MOCKCalculator:
     def __init__(
         self,
-        db_dir: str | Path | None = None,
-        config: MockConfig | None = None,
-        code_to_ord: Callable[[str], list[int]] | None = None,
+        db_dir=None,
+        config=None,
+        code_to_ord=None,
     ):
         """code_to_ord를 넘기지 않으면 optimizer.code_to_ord를 늦게 import한다.
 
@@ -172,7 +171,7 @@ class MOCKCalculator:
         self._ords = None           # (n_x, n_vars) ordinal 행렬. fit()에서 채운다
         self._ranges = None         # (n_vars,) 거리 정규화용
 
-    def _ord_vec(self, x: str) -> np.ndarray:
+    def _ord_vec(self, x):
         if self._code_to_ord is None:
             from optimizer import code_to_ord  # optimizer.py는 이 저장소 밖에 있다
 
@@ -180,7 +179,7 @@ class MOCKCalculator:
         return np.asarray(self._code_to_ord(x), dtype=float)
 
     # ---- 적재 -------------------------------------------------------------
-    def _load_database(self, db_dir: str | Path | None = None) -> dict[str, RawObservations]:
+    def _load_database(self, db_dir=None):
         """디스크에서 catalog + npz를 읽어 x별 raw 관측으로 모은다.
 
         디스크를 만지는 건 여기까지다. 합의·ordinal·거리 정규화 같은 파생은
@@ -222,7 +221,7 @@ class MOCKCalculator:
         return dict(loaded)
 
     # ---- fit -------------------------------------------------------------
-    def fit(self) -> "MOCKCalculator":
+    def fit(self):
         """database/를 메모리로 올린다. _update_database 재실행 후 다시 호출한다.
 
         _load_database()가 읽어온 raw 관측에서 합의 배열과 거리 계산에 쓰는
@@ -260,12 +259,12 @@ class MOCKCalculator:
         return self
 
     # ---- 거리 -------------------------------------------------------------
-    def _distances(self, ord_vec: np.ndarray) -> np.ndarray:
+    def _distances(self, ord_vec):
         """정규화 L1: sum(|a-b| / range) / n_vars."""
         return (np.abs(self._ords - ord_vec) / self._ranges).sum(axis=1) / self._ords.shape[1]
 
     # ---- 예측 -------------------------------------------------------------
-    def predict(self, x: str) -> MockResult:
+    def predict(self, x):
         if self._ords is None:
             raise RuntimeError("fit()을 먼저 호출할 것")
         obs = self.observed.get(x)
@@ -279,7 +278,7 @@ class MOCKCalculator:
             )
         return self._predict_layer2(x, self._ord_vec(x))
 
-    def _predict_layer2(self, x: str, ord_vec: np.ndarray, exclude: int | None = None) -> MockResult:
+    def _predict_layer2(self, x, ord_vec, exclude=None):
         dists = self._distances(ord_vec)
         if exclude is not None:
             dists = dists.copy()
@@ -310,7 +309,7 @@ class MOCKCalculator:
             n_obs=0, nearest_dist=float(dists[order[0]]),
         )
 
-    def _result(self, x, layer, p, list_means, scalars, n_obs, nearest_dist) -> MockResult:
+    def _result(self, x, layer, p, list_means, scalars, n_obs, nearest_dist):
         objectives = {ARRAY_SUM_KEY: float(sum(p[key].sum() for key in ARRAY_KEYS))}
         for key in LIST_KEYS:
             objectives[objective_key(key)] = list_means[key]
@@ -322,7 +321,7 @@ class MOCKCalculator:
             needs_test=nearest_dist > self.cfg.trust_dist,
         )
 
-    def objectives(self, x: str) -> dict[str, float]:
+    def objectives(self, x):
         """목적별 값. array_sum은 최대화, <list key>_mean은 최소화 대상.
 
         가중 결합은 하지 않는다 — trade-off를 고르는 건 옵티마이저의 책임이다.
@@ -330,7 +329,7 @@ class MOCKCalculator:
         return self.predict(x).objectives
 
     # ---- 검증 -------------------------------------------------------------
-    def validate(self, x: str, result: MockResult) -> ValidationReport:
+    def validate(self, x, result):
         """예측이 x의 실제 관측과 모순되지 않는지 본다. 관측된 x에만 쓸 수 있다."""
         obs = self.observed.get(x)
         if obs is None:
@@ -363,14 +362,14 @@ class MOCKCalculator:
             report.ok &= report.scalars[key]["ok"]
         return report
 
-    def _check_scalar(self, values: np.ndarray, value: float, n_obs: int) -> dict:
+    def _check_scalar(self, values, value, n_obs):
         lo, hi, rule = scalar_bounds(values, self.cfg)
         return {
             "ok": bool(lo <= value <= hi), "value": value,
             "lo": lo, "hi": hi, "n_obs": n_obs, "rule": rule,
         }
 
-    def self_check(self) -> dict:
+    def self_check(self):
         """합의가 자기 관측 범위를 통과하는지. 구조적으로 100%여야 한다."""
         failures = [x for x in self._x_list if not self.validate(x, self.predict(x)).ok]
         return {
@@ -380,7 +379,7 @@ class MOCKCalculator:
             "failures": failures[:10],
         }
 
-    def loo_check(self, limit: int | None = None) -> dict:
+    def loo_check(self, limit=None):
         """leave-one-out으로 층2의 예측력을 잰다."""
         if len(self._x_list) < 2:
             return {"n_x": len(self._x_list), "note": "관측 x가 2개 미만이라 생략"}
@@ -404,7 +403,7 @@ class MOCKCalculator:
         }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     ap = argparse.ArgumentParser(description="MOCKCalculator fit + 자가 점검")
     ap.add_argument("--db-dir", default=DB_DIR)
     ap.add_argument("--k", type=int, default=MockConfig.k)
