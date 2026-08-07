@@ -80,4 +80,3 @@ def test_pipeline_runs_end_to_end_on_declared_keys(tmp_path, code_to_ord):
         objective_key(k) for k in udb.LIST_KEYS
     }
     assert set(result.scalars) == set(udb.SCALAR_KEYS)
-    assert mock.self_check()["pass_rate"] == 1.0

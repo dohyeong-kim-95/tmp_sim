@@ -1,14 +1,7 @@
 import numpy as np
 import pytest
 
-from MOCKCalculator import (
-    ARRAY_SUM_KEY,
-    MOCKCalculator,
-    MockConfig,
-    dilate,
-    erode,
-    objective_key,
-)
+from MOCKCalculator import ARRAY_SUM_KEY, MOCKCalculator, MockConfig, objective_key
 from util._update_database import ARRAY_KEYS, LIST_KEYS, SCALAR_KEYS
 
 
@@ -18,7 +11,7 @@ def mock(db_dir, code_to_ord):
 
 
 def test_stage1_builds_skeletons_without_arrays(db_dir, raw_dir, code_to_ord):
-    """1단계는 catalog만 읽는다 — 배열 자리는 비어 있고 list/scalar만 채워진다."""
+    """1단계는 catalog만 읽는다 — 배열 자리는 비어 있고 means만 채워진다."""
     mock = MOCKCalculator(db_dir, code_to_ord=code_to_ord)
     observed, rows_by_array_id = mock._read_catalog(db_dir)
 
@@ -27,32 +20,27 @@ def test_stage1_builds_skeletons_without_arrays(db_dir, raw_dir, code_to_ord):
     for code in raw_dir["repeated_codes"]:
         obs = observed[code]
         assert obs.n_obs == 2                         # run_a + run_b
-        assert all(obs.stacks[key] == [] for key in ARRAY_KEYS)
-        assert not obs.consensus and not obs.p
-        for key in LIST_KEYS:
-            assert obs.list_means[key].shape == (2,)
-        for key in SCALAR_KEYS:
-            assert obs.scalars[key].shape == (2,)
+        assert all(obs.p[key] == [] for key in ARRAY_KEYS)
+        assert set(obs.means) == set(LIST_KEYS) | set(SCALAR_KEYS)
+        assert all(isinstance(v, float) for v in obs.means.values())
 
 
-def test_stage2_fills_arrays_then_stage3_summarizes(db_dir, raw_dir, code_to_ord):
-    """2단계가 슬라이스를 쌓고, 3단계가 그걸 stack해 p/consensus를 만든다."""
+def test_stage2_fills_arrays_then_stage3_folds_them(db_dir, raw_dir, code_to_ord):
+    """2단계가 슬라이스를 쌓고, 3단계가 그걸 원소별 True 비율로 접는다."""
     mock = MOCKCalculator(db_dir, code_to_ord=code_to_ord)
     observed, rows_by_array_id = mock._read_catalog(db_dir)
 
     mock._load_arrays(db_dir, observed, rows_by_array_id)
     for code in raw_dir["repeated_codes"]:
         for key in ARRAY_KEYS:
-            slices = observed[code].stacks[key]
+            slices = observed[code].p[key]
             assert len(slices) == observed[code].n_obs
             assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices)
 
-    stacked = {code: np.stack(observed[code].stacks[ARRAY_KEYS[0]]) for code in observed}
-    mock._build_consensus(observed)
+    stacked = {code: np.stack(observed[code].p[ARRAY_KEYS[0]]) for code in observed}
+    mock._build_p(observed)
     for code, obs in observed.items():
-        assert obs.stacks[ARRAY_KEYS[0]].shape == (obs.n_obs,) + raw_dir["shape"]
-        for key in ARRAY_KEYS:
-            assert np.array_equal(obs.consensus[key], obs.p[key] >= 0.5)
+        assert obs.p[ARRAY_KEYS[0]].shape == raw_dir["shape"]
         assert np.array_equal(obs.p[ARRAY_KEYS[0]], stacked[code].mean(axis=0))
 
 
@@ -74,7 +62,7 @@ def test_layer1_returns_consensus(mock, raw_dir):
     for key in ARRAY_KEYS:
         assert r.p_arrays[key].shape == raw_dir["shape"]
         assert r.p_arrays[key].min() >= 0.0 and r.p_arrays[key].max() <= 1.0
-        assert np.array_equal(r.arrays[key], obs.stacks[key].mean(axis=0) >= 0.5)
+        assert np.array_equal(r.arrays[key], obs.p[key] >= 0.5)
 
 
 def test_noise_shows_up_as_fractional_p(mock, raw_dir):
@@ -98,12 +86,11 @@ def test_objectives_shape_and_meaning(mock, raw_dir):
     # list y의 목적값은 관측별 mean(list)의 평균이다.
     for key in LIST_KEYS:
         assert r.objectives[objective_key(key)] == pytest.approx(
-            float(mock.observed[code].list_means[key].mean())
+            mock.observed[code].means[key]
         )
     # y5/y6는 batch 설정값이라 목적함수가 아니다.
     assert set(r.scalars) == set(SCALAR_KEYS)
     assert not set(SCALAR_KEYS) & set(r.objectives)
-    assert mock.objectives(code) == r.objectives
 
 
 def test_result_has_no_combined_score(mock, raw_dir):
@@ -160,17 +147,17 @@ def test_layer2_weight_pulls_prediction_toward_nearest_neighbor(db_dir):
     anchor_obs = mock.observed[anchor]
     # 배열은 anchor의 합의와 일치해야 한다.
     for key in ARRAY_KEYS:
-        assert np.array_equal(pred.arrays[key], anchor_obs.consensus[key])
+        assert np.array_equal(pred.arrays[key], anchor_obs.p[key] >= 0.5)
 
     # list y 파생 목적값은 anchor 값에 붙는다. 관측값 전체 폭 대비 5% 미만 —
     # 거리 가중이 아니라 균등 평균이었다면 이 폭의 절반쯤 벗어난다.
     for key in LIST_KEYS:
         name = objective_key(key)
-        values = [float(o.list_means[key].mean()) for o in mock.observed.values()]
+        values = [o.means[key] for o in mock.observed.values()]
         spread = max(values) - min(values)
         assert spread > 0
 
-        anchor_value = float(anchor_obs.list_means[key].mean())
+        anchor_value = anchor_obs.means[key]
         gap = abs(pred.objectives[name] - anchor_value)
         assert gap < 0.05 * spread
         assert gap < abs(pred.objectives[name] - np.mean(values))   # 균등 평균보다 가깝다
@@ -186,62 +173,6 @@ def test_trust_dist_controls_needs_test(db_dir, code_to_ord):
     assert not loose.predict("ZZZ").needs_test
 
 
-def test_validate_accepts_consensus(mock):
-    for code in mock.observed:
-        assert mock.validate(code, mock.predict(code))["ok"]
-
-
-def test_validate_rejects_array_outside_union(mock, raw_dir):
-    code = raw_dir["repeated_codes"][0]
-    key = ARRAY_KEYS[0]
-    r = mock.predict(code)
-    r.arrays[key] = r.arrays[key] | ~mock.observed[code].stacks[key].any(axis=0)
-
-    report = mock.validate(code, r)
-    assert not report["ok"]
-    assert report["arrays"][key]["above"] > 0
-
-
-def test_validate_rejects_list_objective_out_of_range(mock, raw_dir):
-    code = raw_dir["repeated_codes"][0]
-    name = objective_key(LIST_KEYS[0])
-    r = mock.predict(code)
-    r.objectives[name] += 1e6
-
-    report = mock.validate(code, r)
-    assert not report["ok"]
-    assert not report["objectives"][name]["ok"]
-
-
-def test_validate_rejects_unknown_x(mock):
-    with pytest.raises(KeyError):
-        mock.validate("ZZZ", mock.predict("ZZZ"))
-
-
-def test_self_check_passes(mock):
-    result = mock.self_check()
-    assert result["n_fail"] == 0
-    assert result["pass_rate"] == 1.0
-
-
-def test_loo_check_reports_layer2_quality(mock):
-    result = mock.loo_check()
-    assert result["n_x"] == len(mock.observed)
-    assert 0.0 <= result["pass_rate"] <= 1.0
-    assert 0.0 <= result["needs_test_rate"] <= 1.0
-    assert 0.0 <= result["mean_elementwise_agreement"] <= 1.0
-
-
 def test_predict_requires_fit(db_dir, code_to_ord):
     with pytest.raises(RuntimeError, match="fit"):
         MOCKCalculator(db_dir, code_to_ord=code_to_ord).predict("AAA")
-
-
-def test_dilate_erode_do_not_wrap():
-    m = np.zeros((3, 3), dtype=bool)
-    m[0, 0] = True
-    d = dilate(m, 1)
-    assert d[0, 1] and d[1, 0]
-    assert not d[2, 2] and not d[0, 2]      # np.roll이었다면 wrap되어 True
-    assert not erode(m, 1).any()
-    assert erode(dilate(np.ones((3, 3), dtype=bool), 1), 1).all()
