@@ -17,36 +17,43 @@ def mock(db_dir, code_to_ord):
     return MOCKCalculator(db_dir, MockConfig(k=3, trust_dist=0.05), code_to_ord).fit()
 
 
-def test_load_database_returns_raw_observations(db_dir, raw_dir, code_to_ord):
-    """적재 단계는 디스크에서 읽기만 한다 — 합의/ordinal 같은 파생은 fit의 몫."""
-    loaded = MOCKCalculator(db_dir, code_to_ord=code_to_ord)._load_database()
+def test_stage1_builds_skeletons_without_arrays(db_dir, raw_dir, code_to_ord):
+    """1단계는 catalog만 읽는다 — 배열 자리는 비어 있고 list/scalar만 채워진다."""
+    mock = MOCKCalculator(db_dir, code_to_ord=code_to_ord)
+    observed, rows_by_array_id = mock._read_catalog(db_dir)
 
-    assert set(loaded) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
+    assert set(observed) == set(raw_dir["repeated_codes"]) | set(raw_dir["single_codes"])
+    assert set(rows_by_array_id) == set(raw_dir["complete_array_ids"])
     for code in raw_dir["repeated_codes"]:
-        slices, rows = loaded[code]["slices"], loaded[code]["rows"]
-        assert len(rows) == 2                         # run_a + run_b
-        for key in ARRAY_KEYS:
-            assert len(slices[key]) == len(rows)
-            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices[key])
-        # catalog 줄은 손대지 않고 그대로 실려 온다 (list y도 원본 리스트).
+        obs = observed[code]
+        assert obs.n_obs == 2                         # run_a + run_b
+        assert all(obs.stacks[key] == [] for key in ARRAY_KEYS)
+        assert not obs.consensus and not obs.p
         for key in LIST_KEYS:
-            assert all(isinstance(row[key], list) for row in rows)
+            assert obs.list_means[key].shape == (2,)
         for key in SCALAR_KEYS:
-            assert all(isinstance(row[key], float) for row in rows)
+            assert obs.scalars[key].shape == (2,)
 
 
-def test_fit_derives_from_what_load_database_returned(db_dir, code_to_ord):
-    """fit은 적재 결과만 소비한다 — 주입된 관측이 그대로 합의로 이어진다."""
-    mock = MOCKCalculator(db_dir, MockConfig(k=3), code_to_ord)
-    loaded = mock._load_database()
-    mock.fit()
+def test_stage2_fills_arrays_then_stage3_summarizes(db_dir, raw_dir, code_to_ord):
+    """2단계가 슬라이스를 쌓고, 3단계가 그걸 stack해 p/consensus를 만든다."""
+    mock = MOCKCalculator(db_dir, code_to_ord=code_to_ord)
+    observed, rows_by_array_id = mock._read_catalog(db_dir)
 
-    for code, raw in loaded.items():
-        obs = mock.observed[code]
-        assert obs.n_obs == len(raw["rows"])
+    mock._load_arrays(db_dir, observed, rows_by_array_id)
+    for code in raw_dir["repeated_codes"]:
         for key in ARRAY_KEYS:
-            stack = np.stack(raw["slices"][key])
-            assert np.array_equal(obs.consensus[key], stack.mean(axis=0) >= 0.5)
+            slices = observed[code].stacks[key]
+            assert len(slices) == observed[code].n_obs
+            assert all(a.shape == raw_dir["shape"] and a.dtype == bool for a in slices)
+
+    stacked = {code: np.stack(observed[code].stacks[ARRAY_KEYS[0]]) for code in observed}
+    mock._build_consensus(observed)
+    for code, obs in observed.items():
+        assert obs.stacks[ARRAY_KEYS[0]].shape == (obs.n_obs,) + raw_dir["shape"]
+        for key in ARRAY_KEYS:
+            assert np.array_equal(obs.consensus[key], obs.p[key] >= 0.5)
+        assert np.array_equal(obs.p[ARRAY_KEYS[0]], stacked[code].mean(axis=0))
 
 
 def test_fit_groups_repeated_observations(mock, raw_dir):

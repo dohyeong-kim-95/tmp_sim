@@ -148,56 +148,69 @@ class MOCKCalculator:
             self._code_to_ord = code_to_ord
         return np.asarray(self._code_to_ord(x), dtype=float)
 
-    # ---- 적재 -------------------------------------------------------------
-    def _load_database(self, db_dir=None):
-        """db_dir을 읽어 x -> {"slices": array key별 관측 리스트, "rows": catalog 줄}을 돌려준다."""
-        db_dir = Path(db_dir) if db_dir is not None else self.db_dir
-
-        catalog_path = db_dir / CATALOG_NAME
-        array_id_to_catalog_rows = defaultdict(list)   # array_id -> catalog 줄들
-        with catalog_path.open("rb") as f:
+    # ---- 1. 뼈대: catalog를 x별로 묶어 배열 없는 Observed를 만든다 ----------
+    def _read_catalog(self, db_dir):
+        """catalog를 읽어 (x -> 배열이 빈 Observed, array_id -> 그 npz가 담당하는 줄들)을 돌려준다."""
+        rows_by_x = defaultdict(list)
+        rows_by_array_id = defaultdict(list)
+        with (db_dir / CATALOG_NAME).open("rb") as f:
             for line in f:
                 if line.strip():
                     row = orjson.loads(line)
-                    array_id_to_catalog_rows[row["array_id"]].append(row)
-        if not array_id_to_catalog_rows:
-            raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
+                    rows_by_x[row["x"]].append(row)
+                    rows_by_array_id[row["array_id"]].append(row)
+        if not rows_by_x:
+            raise RuntimeError(f"catalog가 비어 있다: {db_dir / CATALOG_NAME}")
 
-        loaded = defaultdict(lambda: {"slices": defaultdict(list), "rows": []})
-        for array_id, group in array_id_to_catalog_rows.items():
+        observed = {
+            x: Observed(
+                x=x,
+                ord_vec=self._ord_vec(x),
+                n_obs=len(rows),
+                stacks={key: [] for key in ARRAY_KEYS},   # 2단계가 채운다
+                consensus={},                             # 3단계가 채운다
+                p={},                                     # 3단계가 채운다
+                # list y는 평균만 쓰므로 원소별 합의를 하지 않는다.
+                list_means={
+                    key: np.asarray([float(np.mean(r[key])) for r in rows], dtype=float)
+                    for key in LIST_KEYS
+                },
+                scalars={
+                    key: np.asarray([r[key] for r in rows], dtype=float)
+                    for key in SCALAR_KEYS
+                },
+            )
+            for x, rows in rows_by_x.items()
+        }
+        return observed, rows_by_array_id
+
+    # ---- 2. 배열 주입: npz를 array_id당 한 번만 열어 슬라이스를 쌓는다 -------
+    def _load_arrays(self, db_dir, observed, rows_by_array_id):
+        """각 npz의 batch_pos 슬라이스를 해당 x의 Observed.stacks에 쌓는다 (반환 없음)."""
+        for array_id, rows in rows_by_array_id.items():
             with np.load(db_dir / ARRAYS_DIRNAME / f"{array_id}.npz") as npz:
                 batched = {key: npz[key] for key in ARRAY_KEYS}   # npz[key]는 캐시 안 되므로 루프 밖에서
-                for row in group:
-                    per_x = loaded[row["x"]]
+                for row in rows:
+                    stacks = observed[row["x"]].stacks
                     for key in ARRAY_KEYS:
-                        per_x["slices"][key].append(batched[key][row["batch_pos"]].astype(bool))
-                    per_x["rows"].append(row)
-        return dict(loaded)
+                        stacks[key].append(batched[key][row["batch_pos"]].astype(bool))
+
+    # ---- 3. 합의 계산: 쌓인 슬라이스를 요약한다 -----------------------------
+    def _build_consensus(self, observed):
+        """각 Observed의 stacks를 np.stack하고 True 비율 p와 다수결 consensus를 채운다 (반환 없음)."""
+        for obs in observed.values():
+            obs.stacks = {key: np.stack(obs.stacks[key]) for key in ARRAY_KEYS}
+            obs.p = {key: obs.stacks[key].mean(axis=0) for key in ARRAY_KEYS}
+            obs.consensus = {key: obs.p[key] >= 0.5 for key in ARRAY_KEYS}
 
     # ---- fit -------------------------------------------------------------
     def fit(self):
         """database/를 x별 Observed와 거리 계산용 ordinal 행렬로 올리고 self를 돌려준다."""
-        self.observed = {}
-        for x, raw in self._load_database().items():
-            stacks = {key: np.stack(raw["slices"][key]) for key in ARRAY_KEYS}
-            p = {key: stacks[key].mean(axis=0) for key in ARRAY_KEYS}
-            self.observed[x] = Observed(
-                x=x,
-                ord_vec=self._ord_vec(x),
-                n_obs=stacks[ARRAY_KEYS[0]].shape[0],
-                stacks=stacks,
-                consensus={key: p[key] >= 0.5 for key in ARRAY_KEYS},
-                p=p,
-                # list y는 평균만 쓰므로 원소별 합의를 하지 않는다.
-                list_means={
-                    key: np.asarray([float(np.mean(r[key])) for r in raw["rows"]], dtype=float)
-                    for key in LIST_KEYS
-                },
-                scalars={
-                    key: np.asarray([r[key] for r in raw["rows"]], dtype=float)
-                    for key in SCALAR_KEYS
-                },
-            )
+        observed, rows_by_array_id = self._read_catalog(self.db_dir)
+        self._load_arrays(self.db_dir, observed, rows_by_array_id)
+        self._build_consensus(observed)
+
+        self.observed = observed
         self._x_list = sorted(self.observed)
         self._ords = np.stack([self.observed[x].ord_vec for x in self._x_list])
         spread = self._ords.max(axis=0) - self._ords.min(axis=0)
