@@ -187,8 +187,12 @@ class MOCKCalculator:
         fit()이 이 결과 위에서만 한다. 두 단계를 갈라두면 적재를 갈아끼우거나
         (다른 db_dir, 미리 만든 관측) fit의 모델링만 따로 시험할 수 있다.
 
-        같은 npz를 두 번 열지 않도록 catalog를 array_id로 묶어 파일당 한 번만
-        연다. 반환값의 배열 리스트 순서는 catalog에 나타난 순서다.
+        catalog를 array_id로 묶는 건 npz 하나를 **파일당 한 번만 압축 해제**하기
+        위해서다. NpzFile은 캐시하지 않아서 npz[key]가 매번 배열 전체를 다시 푼다.
+        그래서 묶어서 읽되 npz[key]도 batch 루프 밖으로 빼야 한다 — 둘 중 하나만
+        해서는 batch배 만큼의 중복 압축 해제가 그대로 남는다.
+
+        반환값의 배열 리스트 순서는 catalog에 나타난 순서다.
         """
         db_dir = Path(db_dir) if db_dir is not None else self.db_dir
 
@@ -208,11 +212,12 @@ class MOCKCalculator:
         for array_id, group in by_array.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
+                batched = {key: npz[key] for key in ARRAY_KEYS}   # 파일당 1회 압축 해제
                 for row in group:
                     pos = row["batch_pos"]
                     per_x = loaded[row["x"]]
                     for key in ARRAY_KEYS:
-                        per_x.slices[key].append(npz[key][pos].astype(bool))
+                        per_x.slices[key].append(batched[key][pos].astype(bool))
                     per_x.rows.append(row)
         return dict(loaded)
 
