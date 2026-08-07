@@ -63,7 +63,7 @@ class UpdateDatabaseError(RuntimeError):
 # --------------------------------------------------------------------------
 def load_done_ids(catalog_path: Path) -> set[str]:
     """catalog에 이미 기록된 array_id 집합. 멱등성의 근거."""
-    done: set[str] = set()
+    done = set()
     if not catalog_path.exists():
         return done
     with catalog_path.open("rb") as f:
@@ -80,7 +80,7 @@ def read_run(path: Path) -> dict[int, dict]:
     그건 정상 상황이므로 경고만 하고 넘긴다(다음 실행에서 완성된다).
     마지막이 아닌 줄이 깨졌다면 진짜 손상이므로 중단한다.
     """
-    records: dict[int, dict] = {}
+    records = {}                     # iteration -> 병합된 레코드
     with path.open("rb") as f:
         lines = f.readlines()
     last_lineno = max((i for i, l in enumerate(lines, 1) if l.strip()), default=0)

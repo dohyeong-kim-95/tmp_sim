@@ -167,10 +167,10 @@ class MOCKCalculator:
         self.db_dir = Path(db_dir) if db_dir is not None else DB_DIR
         self.cfg = config or MockConfig()
         self._code_to_ord = code_to_ord
-        self.observed: dict[str, Observed] = {}
-        self._x_list: list[str] = []
-        self._ords: np.ndarray | None = None      # (n_x, n_vars)
-        self._ranges: np.ndarray | None = None    # (n_vars,)
+        self.observed = {}          # x -> Observed
+        self._x_list = []           # 정렬된 관측 x 목록. _ords의 행 순서
+        self._ords = None           # (n_x, n_vars) ordinal 행렬. fit()에서 채운다
+        self._ranges = None         # (n_vars,) 거리 정규화용
 
     def _ord_vec(self, x: str) -> np.ndarray:
         if self._code_to_ord is None:
@@ -199,7 +199,7 @@ class MOCKCalculator:
         # catalog 줄이 담는 건 (array_id, batch_pos) 좌표와 list/scalar 값이다.
         # 배열 자체는 npz에 있으므로 읽으면서 바로 array_id로 묶어둔다.
         catalog_path = db_dir / CATALOG_NAME
-        array_id_to_catalog_rows: dict[str, list[dict]] = defaultdict(list)
+        array_id_to_catalog_rows = defaultdict(list)   # array_id -> catalog 줄들
         with catalog_path.open("rb") as f:
             for line in f:
                 if line.strip():
@@ -208,7 +208,7 @@ class MOCKCalculator:
         if not array_id_to_catalog_rows:
             raise RuntimeError(f"catalog가 비어 있다: {catalog_path}")
 
-        loaded: dict[str, RawObservations] = defaultdict(RawObservations)
+        loaded = defaultdict(RawObservations)          # x -> RawObservations
         for array_id, group in array_id_to_catalog_rows.items():
             path = db_dir / ARRAYS_DIRNAME / f"{array_id}.npz"
             with np.load(path) as npz:
